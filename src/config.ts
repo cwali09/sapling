@@ -30,6 +30,7 @@ const VALID_BACKENDS: LlmBackend[] = ["sdk"];
 
 /** Known provider base URLs for Anthropic-compatible APIs. */
 const PROVIDER_BASE_URLS: Record<string, string> = {
+	anthropic: "https://api.anthropic.com",
 	minimax: "https://api.minimax.io/anthropic",
 };
 
@@ -135,6 +136,16 @@ export async function loadYamlConfigFile(filePath: string): Promise<Partial<Sapl
 export function validateConfig(config: Partial<SaplingConfig>): SaplingConfig {
 	const merged: SaplingConfig = { ...DEFAULT_CONFIG, ...config };
 	merged.model = resolveModelAlias(merged.model);
+
+	// Auto-resolve base URL when the model's provider doesn't match the current base URL.
+	// This prevents e.g. --model sonnet from routing to MiniMax's endpoint.
+	if (!config.apiBaseUrl) {
+		const provider = resolveProvider(merged.model);
+		const expectedBaseUrl = PROVIDER_BASE_URLS[provider];
+		if (expectedBaseUrl && merged.apiBaseUrl !== expectedBaseUrl) {
+			merged.apiBaseUrl = expectedBaseUrl;
+		}
+	}
 
 	if (Number.isNaN(merged.maxTurns) || !Number.isFinite(merged.maxTurns) || merged.maxTurns < 1) {
 		throw new ConfigError(
