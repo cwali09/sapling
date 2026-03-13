@@ -1,0 +1,87 @@
+graph TD
+    subgraph CLI["CLI Layer"]
+        INDEX["src/index.ts<br/>Commander entry point"]
+        CLITS["src/cli.ts<br/>runCommand() — wires components"]
+        CMDS["src/commands/<br/>auth, config, init, doctor, upgrade"]
+    end
+
+    subgraph AgentLoop["Agent Loop"]
+        LOOP["src/loop.ts<br/>runLoop() — turn-based execution"]
+        SESSION["src/session.ts<br/>Session history (.sapling/session.jsonl)"]
+    end
+
+    subgraph Context["Context Pipeline (v1)"]
+        PIPELINE["pipeline.ts<br/>SaplingPipelineV1.process()"]
+        INGEST["ingest.ts<br/>Parse messages → Turn objects"]
+        EVALUATE["evaluate.ts<br/>Score turns 0–1"]
+        COMPACT["compact.ts<br/>Summarize low-scoring turns"]
+        BUDGET["budget.ts<br/>Token allocation across zones"]
+        RENDER["render.ts<br/>Assemble final messages"]
+        REGISTRY["registry.ts<br/>Composable stage registry"]
+    end
+
+    subgraph LLM["LLM Client"]
+        ANTHROPIC["client/anthropic.ts<br/>Anthropic SDK (optional dep)"]
+    end
+
+    subgraph Tools["Tool Registry"]
+        BASH_T["bash.ts"]
+        READ_T["read.ts"]
+        WRITE_T["write.ts"]
+        EDIT_T["edit.ts"]
+        GREP_T["grep.ts"]
+        GLOB_T["glob.ts"]
+    end
+
+    subgraph Hooks["Hooks & Guards"]
+        GUARDS["guards.ts<br/>5 guard types"]
+        HOOKM["manager.ts<br/>Pre/post tool call hooks"]
+        EVENTS["events.ts<br/>NDJSON event emitter"]
+    end
+
+    subgraph RPC["RPC Control"]
+        CHANNEL["channel.ts<br/>JSON-RPC stdin reader"]
+        SERVER["server.ts<br/>steer / followUp / abort"]
+        SOCKET["socket.ts<br/>Unix socket getState"]
+    end
+
+    INDEX --> CLITS
+    INDEX --> CMDS
+    CLITS --> LOOP
+    LOOP --> ANTHROPIC
+    LOOP --> PIPELINE
+    LOOP --> HOOKM
+    LOOP --> SESSION
+    LOOP --> CHANNEL
+    PIPELINE --> INGEST
+    PIPELINE --> EVALUATE
+    PIPELINE --> COMPACT
+    PIPELINE --> BUDGET
+    PIPELINE --> RENDER
+    PIPELINE --> REGISTRY
+    HOOKM --> GUARDS
+    HOOKM --> EVENTS
+    LOOP --> BASH_T
+    LOOP --> READ_T
+    LOOP --> WRITE_T
+    LOOP --> EDIT_T
+    LOOP --> GREP_T
+    LOOP --> GLOB_T
+    CHANNEL --> SERVER
+    SERVER --> LOOP
+
+    classDef cli fill:#4a9eff,color:#fff
+    classDef loop fill:#ff6b6b,color:#fff
+    classDef ctx fill:#ff9f43,color:#fff
+    classDef llm fill:#2ed573,color:#fff
+    classDef tools fill:#a55eea,color:#fff
+    classDef hooks fill:#ffa502,color:#fff
+    classDef rpc fill:#1e90ff,color:#fff
+
+    class INDEX,CLITS,CMDS cli
+    class LOOP,SESSION loop
+    class PIPELINE,INGEST,EVALUATE,COMPACT,BUDGET,RENDER,REGISTRY ctx
+    class ANTHROPIC llm
+    class BASH_T,READ_T,WRITE_T,EDIT_T,GREP_T,GLOB_T tools
+    class GUARDS,HOOKM,EVENTS hooks
+    class CHANNEL,SERVER,SOCKET rpc
