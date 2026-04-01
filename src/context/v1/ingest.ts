@@ -14,6 +14,7 @@ import type {
 	BoundarySignals,
 	Operation,
 	OperationType,
+	PipelineTuning,
 	ToolPhase,
 	Turn,
 	TurnMetadata,
@@ -400,14 +401,16 @@ export function computeBoundarySignals(activeOp: Operation, turn: Turn): Boundar
  * steerRedirect is an unconditional override: a steer with redirect language
  * always triggers a boundary regardless of other signals.
  */
-export function detectBoundary(signals: BoundarySignals): boolean {
+export function detectBoundary(signals: BoundarySignals, tuning?: PipelineTuning): boolean {
 	if (signals.steerRedirect) return true;
+	const weights = { ...BOUNDARY_WEIGHTS, ...tuning?.boundaryWeights };
+	const threshold = tuning?.boundaryThreshold ?? BOUNDARY_THRESHOLD;
 	const score =
-		(signals.toolTypeTransition ? BOUNDARY_WEIGHTS.toolTypeTransition : 0) +
-		(signals.fileScopeChange ? BOUNDARY_WEIGHTS.fileScopeChange : 0) +
-		(signals.intentSignal ? BOUNDARY_WEIGHTS.intentSignal : 0) +
-		(signals.temporalGap ? BOUNDARY_WEIGHTS.temporalGap : 0);
-	return score >= BOUNDARY_THRESHOLD;
+		(signals.toolTypeTransition ? weights.toolTypeTransition : 0) +
+		(signals.fileScopeChange ? weights.fileScopeChange : 0) +
+		(signals.intentSignal ? weights.intentSignal : 0) +
+		(signals.temporalGap ? weights.temporalGap : 0);
+	return score >= threshold;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +591,7 @@ export function ingestTurn(
 	activeOperationId: number | null,
 	turn: Turn,
 	nextOperationId: number,
+	tuning?: PipelineTuning,
 ): IngestResult {
 	// No active operation — start fresh
 	if (activeOperationId === null || operations.length === 0) {
@@ -614,7 +618,7 @@ export function ingestTurn(
 	// biome-ignore lint/style/noNonNullAssertion: activeIdx was just verified valid
 	const activeOp = operations[activeIdx]!;
 	const signals = computeBoundarySignals(activeOp, turn);
-	const isBoundary = detectBoundary(signals);
+	const isBoundary = detectBoundary(signals, tuning);
 
 	const updatedOps = [...operations];
 
@@ -657,6 +661,7 @@ export function ingest(
 	existingOperations: Operation[],
 	activeOperationId: number | null,
 	nextOperationId: number,
+	tuning?: PipelineTuning,
 ): IngestResult {
 	const allTurns = extractTurns(messages);
 
@@ -682,7 +687,13 @@ export function ingest(
 	};
 
 	for (const turn of newTurns) {
-		result = ingestTurn(result.operations, result.activeOperationId, turn, result.nextOperationId);
+		result = ingestTurn(
+			result.operations,
+			result.activeOperationId,
+			turn,
+			result.nextOperationId,
+			tuning,
+		);
 	}
 
 	return result;

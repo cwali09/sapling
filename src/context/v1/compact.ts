@@ -10,7 +10,7 @@
  */
 
 import { renderCompactSummary } from "./templates.ts";
-import type { Operation, Turn } from "./types.ts";
+import type { Operation, PipelineTuning, Turn } from "./types.ts";
 import { COMPACTION_SCORE_THRESHOLD, TOOL_OUTPUT_TRUNCATION } from "./types.ts";
 
 /** Characters-per-token heuristic (matches budget.ts). */
@@ -89,46 +89,38 @@ function truncateWithLines(
 }
 
 /**
- * Truncate glob output to at most globMaxResults non-empty lines.
+ * Truncate glob output to at most maxResults non-empty lines.
  */
-function truncateGlob(content: string): string {
+function truncateGlob(content: string, maxResults = TOOL_OUTPUT_TRUNCATION.globMaxResults): string {
 	const lines = content.split("\n").filter((l) => l.trim().length > 0);
-	const max = TOOL_OUTPUT_TRUNCATION.globMaxResults;
-	if (lines.length <= max) return content;
-	const kept = lines.slice(0, max);
-	return `${kept.join("\n")}\n[... ${lines.length - max} more results ...]`;
+	if (lines.length <= maxResults) return content;
+	const kept = lines.slice(0, maxResults);
+	return `${kept.join("\n")}\n[... ${lines.length - maxResults} more results ...]`;
 }
 
 /**
  * Apply tool-specific truncation to a tool result content string.
  * Tools not listed here are returned unchanged.
  *
- * @param bashMaxTokens - Override for bash token limit (e.g. use failureBashMaxTokens for failure ops).
+ * @param bashMaxTokens       - Override for bash token limit (e.g. use failureBashMaxTokens for failure ops).
+ * @param truncationOverrides - Optional per-field overrides from PipelineTuning.
  */
 export function truncateToolOutput(
 	toolName: string,
 	content: string,
 	bashMaxTokens = TOOL_OUTPUT_TRUNCATION.bashMaxTokens,
+	truncationOverrides?: PipelineTuning["toolOutputTruncation"],
 ): string {
+	const t = { ...TOOL_OUTPUT_TRUNCATION, ...truncationOverrides };
 	switch (toolName) {
 		case "bash":
-			return truncateWithLines(
-				content,
-				bashMaxTokens,
-				TOOL_OUTPUT_TRUNCATION.bashKeepFirstLines,
-				TOOL_OUTPUT_TRUNCATION.bashKeepLastLines,
-			);
+			return truncateWithLines(content, bashMaxTokens, t.bashKeepFirstLines, t.bashKeepLastLines);
 		case "grep":
-			return truncateToTokens(content, TOOL_OUTPUT_TRUNCATION.grepMaxTokens);
+			return truncateToTokens(content, t.grepMaxTokens);
 		case "read":
-			return truncateWithLines(
-				content,
-				TOOL_OUTPUT_TRUNCATION.readMaxTokens,
-				TOOL_OUTPUT_TRUNCATION.readKeepFirstLines,
-				TOOL_OUTPUT_TRUNCATION.readKeepLastLines,
-			);
+			return truncateWithLines(content, t.readMaxTokens, t.readKeepFirstLines, t.readKeepLastLines);
 		case "glob":
-			return truncateGlob(content);
+			return truncateGlob(content, truncationOverrides?.globMaxResults);
 		default:
 			return content;
 	}
@@ -155,12 +147,13 @@ export function compactOperation(op: Operation): void {
  * Failure-outcome operations use a more aggressive bash token limit.
  * Mutates the turn messages in-place and updates turn.meta.tokens.
  */
-export function truncateOperationOutputs(op: Operation): void {
+export function truncateOperationOutputs(op: Operation, tuning?: PipelineTuning): void {
+	const truncation = tuning?.toolOutputTruncation;
 	// Failure operations get a tighter bash limit to prevent overflow from large test outputs
 	const bashMaxTokens =
 		op.outcome === "failure"
-			? TOOL_OUTPUT_TRUNCATION.failureBashMaxTokens
-			: TOOL_OUTPUT_TRUNCATION.bashMaxTokens;
+			? (truncation?.failureBashMaxTokens ?? TOOL_OUTPUT_TRUNCATION.failureBashMaxTokens)
+			: (truncation?.bashMaxTokens ?? TOOL_OUTPUT_TRUNCATION.bashMaxTokens);
 
 	for (const turn of op.turns) {
 		// Build id → name map from assistant tool_use blocks
@@ -189,7 +182,12 @@ export function truncateOperationOutputs(op: Operation): void {
 			const toolName = toolNameById.get(resultBlock.tool_use_id);
 			if (toolName === undefined) continue;
 
-			resultBlock.content = truncateToolOutput(toolName, resultBlock.content, bashMaxTokens);
+			resultBlock.content = truncateToolOutput(
+				toolName,
+				resultBlock.content,
+				bashMaxTokens,
+				truncation,
+			);
 		}
 
 		// Update cached token count to reflect truncated content so budget.ts sees the real size
@@ -212,21 +210,27 @@ export function truncateOperationOutputs(op: Operation): void {
  * @param operations       - The full operation registry (mutated in-place).
  * @param activeOperationId - ID of the currently active operation (never compacted).
  */
-export function compact(operations: Operation[], activeOperationId: number | null): void {
+export function compact(
+	operations: Operation[],
+	activeOperationId: number | null,
+	tuning?: PipelineTuning,
+): void {
+	const threshold = tuning?.compactionScoreThreshold ?? COMPACTION_SCORE_THRESHOLD;
+
 	for (const op of operations) {
 		if (op.id === activeOperationId) {
 			// Active operation: apply truncation only (never compact — it's still in progress)
-			truncateOperationOutputs(op);
+			truncateOperationOutputs(op, tuning);
 			continue;
 		}
 
 		// Skip already-processed states
 		if (op.status === "compacted" || op.status === "archived") continue;
 
-		if (op.score < COMPACTION_SCORE_THRESHOLD) {
+		if (op.score < threshold) {
 			compactOperation(op);
 		} else {
-			truncateOperationOutputs(op);
+			truncateOperationOutputs(op, tuning);
 		}
 	}
 }
