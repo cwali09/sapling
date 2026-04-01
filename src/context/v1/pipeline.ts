@@ -20,6 +20,7 @@ import type {
 	PipelineInput,
 	PipelineOutput,
 	PipelineState,
+	PipelineTuning,
 	StageContext,
 } from "./types.ts";
 
@@ -37,6 +38,8 @@ export interface PipelineOptions {
 	 * Pass a custom registry to add, remove, or replace pipeline stages.
 	 */
 	registry?: StageRegistry;
+	/** Optional pipeline tuning overrides (from config cascade). */
+	tuning?: PipelineTuning;
 }
 
 /**
@@ -53,11 +56,13 @@ export class SaplingPipelineV1 {
 	private readonly verbose: boolean;
 	private lastState: PipelineState | null = null;
 	private readonly registry: StageRegistry;
+	private readonly tuning?: PipelineTuning;
 
 	constructor(options: PipelineOptions) {
 		this.windowSize = options.windowSize;
 		this.verbose = options.verbose ?? false;
 		this.registry = options.registry ?? createDefaultStageRegistry();
+		this.tuning = options.tuning;
 	}
 
 	/**
@@ -82,6 +87,7 @@ export class SaplingPipelineV1 {
 			input,
 			windowSize: this.windowSize,
 			verbose: this.verbose,
+			tuning: this.tuning,
 			operations: this.operations,
 			activeOperationId: this.activeOperationId,
 			nextOperationId: this.nextOperationId,

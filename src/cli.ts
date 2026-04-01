@@ -159,6 +159,7 @@ export async function runCommand(
 		contextWindowSize: config.contextWindow,
 		abortSignal: abortController.signal,
 		ecosystemConfig,
+		pipelineTuning: config.pipelineTuning,
 	};
 
 	try {
