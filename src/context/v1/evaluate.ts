@@ -198,8 +198,7 @@ function buildSignals(tuning: PipelineTuning): EvalSignal[] {
 		{
 			name: "recency",
 			weight: w.recency ?? EVAL_WEIGHTS.recency,
-			scoreFn: ({ opsAgo }: EvalSignalContext) =>
-				Math.exp((-Math.log(2) * opsAgo) / halfLife),
+			scoreFn: ({ opsAgo }: EvalSignalContext) => Math.exp((-Math.log(2) * opsAgo) / halfLife),
 		},
 		{
 			name: "fileOverlap",
