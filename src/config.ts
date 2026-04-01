@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { readAuthStore } from "./commands/auth.ts";
 import { ConfigError } from "./errors.ts";
-import type { GuardConfig, LlmBackend, SaplingConfig } from "./types.ts";
+import type { GuardConfig, LlmBackend, PipelineTuning, SaplingConfig } from "./types.ts";
 
 const HOME_CONFIG_PATH = join(homedir(), ".sapling", "config.yaml");
 
@@ -54,6 +54,98 @@ export function resolveModelAlias(model: string): string {
 }
 
 /**
+ * Parse a pipeline tuning flat YAML key into a PipelineTuning object.
+ * Returns updated PipelineTuning or false if the key is not a pipeline tuning key.
+ */
+function parsePipelineTuningKey(
+	key: string,
+	val: string,
+	existing: Partial<SaplingConfig>,
+): PipelineTuning | false {
+	if (!key.startsWith("pipeline_")) return false;
+	const n = parseFloat(val);
+	if (Number.isNaN(n)) return false;
+	const tuning: PipelineTuning = existing.pipelineTuning ? { ...existing.pipelineTuning } : {};
+	switch (key) {
+		case "pipeline_boundary_threshold":
+			tuning.boundaryThreshold = n;
+			break;
+		case "pipeline_compaction_threshold":
+			tuning.compactionScoreThreshold = n;
+			break;
+		case "pipeline_recency_half_life":
+			tuning.recencyHalfLifeOps = n;
+			break;
+		case "pipeline_eval_recency":
+			tuning.evalWeights = { ...tuning.evalWeights, recency: n };
+			break;
+		case "pipeline_eval_file_overlap":
+			tuning.evalWeights = { ...tuning.evalWeights, fileOverlap: n };
+			break;
+		case "pipeline_eval_causal_dependency":
+			tuning.evalWeights = { ...tuning.evalWeights, causalDependency: n };
+			break;
+		case "pipeline_eval_outcome_significance":
+			tuning.evalWeights = { ...tuning.evalWeights, outcomeSignificance: n };
+			break;
+		case "pipeline_eval_operation_type":
+			tuning.evalWeights = { ...tuning.evalWeights, operationType: n };
+			break;
+		case "pipeline_boundary_tool_type_transition":
+			tuning.boundaryWeights = { ...tuning.boundaryWeights, toolTypeTransition: n };
+			break;
+		case "pipeline_boundary_file_scope_change":
+			tuning.boundaryWeights = { ...tuning.boundaryWeights, fileScopeChange: n };
+			break;
+		case "pipeline_boundary_intent_signal":
+			tuning.boundaryWeights = { ...tuning.boundaryWeights, intentSignal: n };
+			break;
+		case "pipeline_boundary_temporal_gap":
+			tuning.boundaryWeights = { ...tuning.boundaryWeights, temporalGap: n };
+			break;
+		case "pipeline_budget_system":
+			tuning.budgetAllocations = { ...tuning.budgetAllocations, systemWithArchive: n };
+			break;
+		case "pipeline_budget_operations":
+			tuning.budgetAllocations = { ...tuning.budgetAllocations, activeOperations: n };
+			break;
+		case "pipeline_budget_headroom":
+			tuning.budgetAllocations = { ...tuning.budgetAllocations, headroom: n };
+			break;
+		case "pipeline_truncation_bash_max_tokens":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, bashMaxTokens: n };
+			break;
+		case "pipeline_truncation_bash_keep_first":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, bashKeepFirstLines: n };
+			break;
+		case "pipeline_truncation_bash_keep_last":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, bashKeepLastLines: n };
+			break;
+		case "pipeline_truncation_failure_bash_max_tokens":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, failureBashMaxTokens: n };
+			break;
+		case "pipeline_truncation_grep_max_tokens":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, grepMaxTokens: n };
+			break;
+		case "pipeline_truncation_read_max_tokens":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, readMaxTokens: n };
+			break;
+		case "pipeline_truncation_read_keep_first":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, readKeepFirstLines: n };
+			break;
+		case "pipeline_truncation_read_keep_last":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, readKeepLastLines: n };
+			break;
+		case "pipeline_truncation_glob_max_results":
+			tuning.toolOutputTruncation = { ...tuning.toolOutputTruncation, globMaxResults: n };
+			break;
+		default:
+			return false;
+	}
+	return tuning;
+}
+
+/**
  * Minimal flat YAML parser for .sapling/config.yaml.
  * Handles comment lines (#), blank lines, and key: value pairs.
  * String values may be optionally quoted. Unknown keys are ignored silently.
@@ -92,9 +184,13 @@ export function parseYamlConfig(raw: string): Partial<SaplingConfig> {
 			case "api_key":
 				if (val) result.apiKey = val;
 				break;
-			default:
-				// Silently ignore unknown keys (e.g. project, context_pipeline)
+			default: {
+				const tuningResult = parsePipelineTuningKey(key, val, result);
+				if (tuningResult) {
+					result.pipelineTuning = tuningResult;
+				}
 				break;
+			}
 		}
 	}
 	return result;

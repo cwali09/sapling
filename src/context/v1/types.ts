@@ -5,12 +5,13 @@
  * See docs/context-pipeline-v1.md for design details.
  */
 
-import type { Message, TokenUsage } from "../../types.ts";
+import type { Message, PipelineTuning, TokenUsage } from "../../types.ts";
 
 export type {
 	BudgetEntry,
 	ContentBlock,
 	Message,
+	PipelineTuning,
 	TokenUsage,
 	ToolPipelineMetadata,
 	ToolResultBlock,
@@ -363,6 +364,8 @@ export interface StageContext {
 	windowSize: number;
 	/** Whether to emit verbose debug logs to stderr. */
 	verbose: boolean;
+	/** Optional pipeline tuning overrides (from config cascade). */
+	tuning?: PipelineTuning;
 	/** Operation registry — mutated in place by ingest / compact / budget stages. */
 	operations: Operation[];
 	/** Currently active operation ID — updated by the ingest stage. */

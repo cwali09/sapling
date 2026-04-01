@@ -104,6 +104,49 @@ export interface LoopOptions {
 	abortSignal?: AbortSignal;
 	/** Optional ecosystem integration config (overstory orchestration). */
 	ecosystemConfig?: EcosystemConfig;
+	/** Optional pipeline tuning overrides. */
+	pipelineTuning?: PipelineTuning;
+}
+
+// ─── Pipeline Tuning ─────────────────────────────────────────────────────────
+
+/**
+ * Optional overrides for pipeline tuning constants.
+ * All fields are optional — unset fields use compile-time defaults from context/v1/types.ts.
+ */
+export interface PipelineTuning {
+	evalWeights?: {
+		recency?: number;
+		fileOverlap?: number;
+		causalDependency?: number;
+		outcomeSignificance?: number;
+		operationType?: number;
+	};
+	recencyHalfLifeOps?: number;
+	boundaryWeights?: {
+		toolTypeTransition?: number;
+		fileScopeChange?: number;
+		intentSignal?: number;
+		temporalGap?: number;
+	};
+	boundaryThreshold?: number;
+	budgetAllocations?: {
+		systemWithArchive?: number;
+		activeOperations?: number;
+		headroom?: number;
+	};
+	compactionScoreThreshold?: number;
+	toolOutputTruncation?: {
+		bashMaxTokens?: number;
+		bashKeepFirstLines?: number;
+		bashKeepLastLines?: number;
+		failureBashMaxTokens?: number;
+		grepMaxTokens?: number;
+		readMaxTokens?: number;
+		readKeepFirstLines?: number;
+		readKeepLastLines?: number;
+		globMaxResults?: number;
+	};
 }
 
 export interface LoopResult {
@@ -149,6 +192,7 @@ export interface SaplingConfig {
 	apiBaseUrl?: string;
 	apiKey?: string;
 	guardsFile?: string;
+	pipelineTuning?: PipelineTuning;
 }
 
 export interface RunOptions {

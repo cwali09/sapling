@@ -303,6 +303,7 @@ export async function runLoop(
 	const pipeline = new SaplingPipelineV1({
 		windowSize: options.contextWindowSize ?? 200_000,
 		verbose: false,
+		tuning: options.pipelineTuning,
 	});
 	// Track the pipeline-managed system prompt (updated each turn by the v1 pipeline)
 	let currentSystemPrompt = options.systemPrompt;
