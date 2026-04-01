@@ -108,6 +108,7 @@ const ingestStage: PipelineStage = {
 			ctx.operations,
 			ctx.activeOperationId,
 			ctx.nextOperationId ?? 1,
+			ctx.tuning,
 		);
 		ctx.operations = result.operations;
 		ctx.activeOperationId = result.activeOperationId;
@@ -126,7 +127,7 @@ const ingestStage: PipelineStage = {
 const evaluateStage: PipelineStage = {
 	name: "evaluate",
 	execute(ctx: StageContext): void {
-		evaluate(ctx.operations);
+		evaluate(ctx.operations, ctx.tuning);
 
 		if (ctx.verbose) {
 			for (const op of ctx.operations) {
@@ -141,7 +142,7 @@ const evaluateStage: PipelineStage = {
 const compactStage: PipelineStage = {
 	name: "compact",
 	execute(ctx: StageContext): void {
-		compact(ctx.operations, ctx.activeOperationId);
+		compact(ctx.operations, ctx.activeOperationId, ctx.tuning);
 
 		if (ctx.verbose) {
 			const compacted = ctx.operations.filter((op) => op.status === "compacted").length;
@@ -154,7 +155,7 @@ const budgetStage: PipelineStage = {
 	name: "budget",
 	execute(ctx: StageContext): void {
 		const systemTokens = estimateTokens(ctx.input.systemPrompt);
-		ctx.budgetUtil = budget(ctx.operations, systemTokens, ctx.windowSize);
+		ctx.budgetUtil = budget(ctx.operations, systemTokens, ctx.windowSize, ctx.tuning);
 
 		if (ctx.verbose) {
 			const archived = ctx.operations.filter((op) => op.status === "archived").length;

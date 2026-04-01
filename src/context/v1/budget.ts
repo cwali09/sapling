@@ -19,6 +19,7 @@ import {
 	type BudgetUtilization,
 	MAX_SINGLE_OP_BUDGET_FRACTION,
 	type Operation,
+	type PipelineTuning,
 	V1_BUDGET_ALLOCATIONS,
 	V1_ZONE_BOUNDS,
 } from "./types.ts";
@@ -79,10 +80,12 @@ export function operationTokens(op: Operation): number {
 export function rebalanceBudget(
 	windowSize: number,
 	systemActualTokens: number,
+	tuning?: PipelineTuning,
 ): { systemWithArchive: number; activeOperations: number; headroom: number } {
-	const defaultSystem = Math.floor(windowSize * V1_BUDGET_ALLOCATIONS.systemWithArchive);
-	const defaultOps = Math.floor(windowSize * V1_BUDGET_ALLOCATIONS.activeOperations);
-	const defaultHead = Math.floor(windowSize * V1_BUDGET_ALLOCATIONS.headroom);
+	const allocs = { ...V1_BUDGET_ALLOCATIONS, ...tuning?.budgetAllocations };
+	const defaultSystem = Math.floor(windowSize * allocs.systemWithArchive);
+	const defaultOps = Math.floor(windowSize * allocs.activeOperations);
+	const defaultHead = Math.floor(windowSize * allocs.headroom);
 
 	const sysMin = Math.floor(windowSize * V1_ZONE_BOUNDS.systemWithArchive.min);
 	const opsMax = Math.floor(windowSize * V1_ZONE_BOUNDS.activeOperations.max);
@@ -136,9 +139,10 @@ export function enforceBudget(
 	operations: Operation[],
 	systemPromptTokens: number,
 	windowSize: number,
+	tuning?: PipelineTuning,
 ): BudgetResult {
 	// Rebalance zones: unused system budget flows to operations (and headroom).
-	const zones = rebalanceBudget(windowSize, systemPromptTokens);
+	const zones = rebalanceBudget(windowSize, systemPromptTokens, tuning);
 	const operationBudget = zones.activeOperations;
 
 	// Active operation is always retained regardless of score or budget
@@ -258,8 +262,9 @@ export function budget(
 	operations: Operation[],
 	systemPromptTokens: number,
 	windowSize: number,
+	tuning?: PipelineTuning,
 ): BudgetUtilization {
-	const result = enforceBudget(operations, systemPromptTokens, windowSize);
+	const result = enforceBudget(operations, systemPromptTokens, windowSize, tuning);
 
 	// Mark archived operations in-place
 	for (const op of result.archived) {
