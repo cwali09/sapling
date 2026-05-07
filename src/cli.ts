@@ -136,13 +136,21 @@ export async function runCommand(
 	process.on("SIGTERM", onSignal);
 	process.on("SIGINT", onSignal);
 
-	// Ecosystem integration: load from environment variables (overstory orchestration)
+	// Ecosystem integration: load from CLI options or environment variables (overstory orchestration)
+	// Priority: CLI options > SAPLING_* env vars > OVERSTORY_* env vars (fallback)
+	const ecosystemAgentName =
+		opts.agentName ?? process.env.SAPLING_AGENT_NAME ?? process.env.OVERSTORY_AGENT_NAME;
+	const ecosystemTaskId =
+		opts.taskId ?? process.env.SAPLING_TASK_ID ?? process.env.OVERSTORY_TASK_ID;
+	const ecosystemMetricsPath =
+		opts.metricsPath ?? process.env.SAPLING_METRICS_PATH ?? process.env.OVERSTORY_METRICS_PATH;
+
 	const ecosystemConfig: EcosystemConfig | undefined =
-		process.env.OVERSTORY_AGENT_NAME && process.env.OVERSTORY_TASK_ID
+		ecosystemAgentName && ecosystemTaskId
 			? {
-					agentName: process.env.OVERSTORY_AGENT_NAME,
-					taskId: process.env.OVERSTORY_TASK_ID,
-					metricsPath: process.env.OVERSTORY_METRICS_PATH,
+					agentName: ecosystemAgentName,
+					taskId: ecosystemTaskId,
+					metricsPath: ecosystemMetricsPath,
 				}
 			: undefined;
 

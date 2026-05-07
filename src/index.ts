@@ -63,6 +63,9 @@ program
 	.option("--guards-file <path>", "Path to guards config JSON file")
 	.option("--mode <mode>", "Execution mode: one-shot (default) or rpc")
 	.option("--dry-run", "Show what tools would do without executing")
+	.option("--agent-name <name>", "Agent name for ecosystem config")
+	.option("--task-id <id>", "Task identifier for ecosystem config")
+	.option("--metrics-path <path>", "Metrics output path for ecosystem config")
 	.action(
 		async (prompt: string | undefined, options: Record<string, string | boolean | undefined>) => {
 			try {

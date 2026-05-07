@@ -207,6 +207,12 @@ export interface RunOptions {
 	rpcMode?: boolean;
 	rpcSocket?: string;
 	dryRun?: boolean;
+	/** Ecosystem config: agent name for overstory orchestration */
+	agentName?: string;
+	/** Ecosystem config: task ID for overstory orchestration */
+	taskId?: string;
+	/** Ecosystem config: path to write metrics JSON */
+	metricsPath?: string;
 }
 
 // ─── Context Types ────────────────────────────────────────────────────────────
