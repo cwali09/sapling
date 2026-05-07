@@ -5,7 +5,7 @@
  * Each event is a single JSON line (NDJSON format) with a timestamp field added automatically.
  * When disabled (non-json mode), all methods are no-ops.
  *
- * Event types (consumed by overstory SaplingRuntime.parseEvents()):
+ * Event types (consumed by an orchestrator's NDJSON parser):
  *   ready      — once after initialization
  *   turn_start — at the start of each turn (1-based)
  *   tool_start — before each tool execution

@@ -1,16 +1,14 @@
 /**
- * E2E tests: verify sapling runtime works via overstory.
+ * E2E tests for sapling's general-purpose orchestrator integration surface.
  *
- * These tests verify the integration surface that overstory relies on when
- * spawning sapling as a headless agent subprocess:
- *   1. NDJSON event stream (--json mode) emits correct event sequence
+ * Any orchestrator that spawns sapling as a headless agent subprocess relies on:
+ *   1. NDJSON event stream (--json mode) emits the correct event sequence
  *   2. Guards + eventConfig lifecycle hooks fire at the right moments
  *   3. RPC socket server responds to getState queries
  *   4. Custom system prompt loaded from file
  *   5. RPC abort terminates the loop gracefully
  *
  * Uses mock LLM client + real tool registry. No API key required.
- * sapling-9aec
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -68,7 +66,7 @@ function defaultLoopOptions(cwd: string, overrides: Partial<LoopOptions> = {}): 
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("overstory runtime E2E", () => {
+describe("orchestrator surface E2E", () => {
 	let testDir: string;
 
 	beforeEach(async () => {
@@ -80,8 +78,8 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 1. NDJSON event stream ─────────────────────────────────────────────────
-	// Overstory's SaplingRuntime.parseEvents() consumes these events.
-	// Verify the complete event sequence for a simple tool-using run.
+	// An orchestrator parses these events line-by-line from sapling's stdout
+	// to track turn boundaries, tool dispatches, and final exit reason.
 
 	it("emits correct NDJSON event sequence for a tool-using run", async () => {
 		const filePath = join(testDir, "hello.txt");
@@ -118,7 +116,7 @@ describe("overstory runtime E2E", () => {
 		// result must be last
 		expect(types[types.length - 1]).toBe("result");
 
-		// Verify ready event shape (overstory uses model, maxTurns, tools)
+		// Verify ready event shape (orchestrators read model, maxTurns, tools)
 		const ready = events.find((e) => e.type === "ready");
 		expect(ready).toBeDefined();
 		expect(ready?.model).toBe("mock-model");
@@ -168,7 +166,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 3. Guards + eventConfig: onSessionEnd fires ────────────────────────────
-	// Overstory configures eventConfig.onSessionEnd for session bookkeeping.
+	// Orchestrators wire eventConfig.onSessionEnd to a script for session bookkeeping.
 
 	it("fires eventConfig.onSessionEnd on task_complete", async () => {
 		const markerFile = join(testDir, "session-end-marker");
@@ -238,7 +236,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 5. Custom system prompt via file ───────────────────────────────────────
-	// Overstory passes agent persona files (builder, reviewer, scout).
+	// Orchestrators pass agent persona files (e.g. builder, reviewer, scout).
 
 	it("uses custom system prompt in LLM requests", async () => {
 		const customPrompt = "You are a specialized code reviewer. Never edit files.";
@@ -255,8 +253,8 @@ describe("overstory runtime E2E", () => {
 		expect(firstCall.systemPrompt).toContain("specialized code reviewer");
 	});
 
-	// ── 6. Guards enforcement with overstory-style guards.json ─────────────────
-	// Overstory passes --guards-file with pathBoundary and readOnly for reviewer agents.
+	// ── 6. Guards enforcement with reviewer-style guards.json ──────────────────
+	// Orchestrators pass --guards-file with pathBoundary and readOnly for reviewer agents.
 
 	it("enforces readOnly + pathBoundary guards (reviewer agent pattern)", async () => {
 		const guardsPath = await writeGuardsJson(testDir, {
@@ -312,7 +310,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 7. RPC socket: getState queries ────────────────────────────────────────
-	// Overstory uses `ov inspect` which queries the RPC socket for agent state.
+	// Orchestrators query the RPC socket for live agent state ("what phase is it in?").
 
 	it("responds to getState queries on RPC socket", async () => {
 		const socketPath = join(testDir, "rpc.sock");
@@ -368,7 +366,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 8. RPC abort terminates loop ───────────────────────────────────────────
-	// Overstory sends abort requests to stop agents.
+	// Orchestrators send abort requests to stop agents cleanly.
 
 	it("aborts loop when RPC abort is received before first turn", async () => {
 		const { emitter, events } = createCapturingEmitter();
@@ -405,7 +403,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 9. setState callback updates RPC state ─────────────────────────────────
-	// Overstory queries agent phase via getState — verify setState is called.
+	// Orchestrators read agent phase via getState — verify setState is called.
 
 	it("calls setState callback at turn boundaries", async () => {
 		const states: { turn: number; phase: string }[] = [];
@@ -437,9 +435,9 @@ describe("overstory runtime E2E", () => {
 		expect(states[0]?.phase).toBe("calling_llm");
 	});
 
-	// ── 10. abortSignal terminates loop gracefully (ov stop → SIGTERM) ────────
-	// When ov stop sends SIGTERM, the CLI wires it to abortSignal. Verify
-	// the loop exits with "aborted" and fires onSessionEnd.
+	// ── 10. abortSignal terminates loop gracefully (SIGTERM from orchestrator) ─
+	// When the orchestrator (or any caller) sends SIGTERM, the CLI wires it to
+	// abortSignal. Verify the loop exits with "aborted" and fires onSessionEnd.
 
 	it("abortSignal terminates loop gracefully with onSessionEnd", async () => {
 		const markerFile = join(testDir, "signal-end-marker");
@@ -518,7 +516,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 12. Full subprocess E2E (gated) ────────────────────────────────────────
-	// Spawns sapling as overstory would, with --json mode, verifies NDJSON stdout.
+	// Spawns sapling as an orchestrator would, with --json mode, verifies NDJSON stdout.
 
 	const SKIP_INTEG = !process.env.SAPLING_INTEGRATION_TESTS;
 
@@ -526,7 +524,7 @@ describe("overstory runtime E2E", () => {
 		"subprocess with --json emits parseable NDJSON events",
 		async () => {
 			const filePath = join(testDir, "marker.txt");
-			await Bun.write(filePath, "OV_E2E_MARKER_42");
+			await Bun.write(filePath, "ORCHESTRATOR_E2E_MARKER_42");
 
 			const proc = Bun.spawn(
 				[

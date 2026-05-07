@@ -129,8 +129,8 @@ function extractFilesModified(
 
 /**
  * Await the onSessionEnd hook if configured.
- * Must be awaited (unlike tool events) — overstory uses this for critical
- * session bookkeeping: token metrics, state transition, and worker_done mail.
+ * Must be awaited (unlike tool events) — orchestrators rely on this for
+ * critical session bookkeeping (token metrics, state transitions, etc.).
  */
 async function fireSessionEnd(argv: string[] | undefined): Promise<void> {
 	if (!argv) return;
@@ -139,29 +139,6 @@ async function fireSessionEnd(argv: string[] | undefined): Promise<void> {
 }
 
 // ─── Ecosystem Integration Helpers ─────────────────────────────────────────────
-
-/**
- * Check for pending mail from overstory orchestrator.
- * Fires after each turn to pick up steer/followUp/interrupt requests.
- * @returns true if the agent should continue, false if interrupted
- */
-async function checkEcosystemMail(ecosystem: EcosystemConfig): Promise<boolean> {
-	try {
-		const proc = Bun.spawn(["ov", "mail", "check", "--agent", ecosystem.agentName], {
-			stdout: "pipe",
-			stderr: "ignore",
-		});
-		const _output = await new Response(proc.stdout).text();
-		await proc.exited;
-		// Exit code 0 means mail present (needs attention), 1 means no mail
-		// For now, we just check and don't act on it - the orchestrator sends RPC
-		// commands via the socket/stdin channel. This is a heartbeat signal.
-		return true;
-	} catch {
-		// If mail check fails, continue loop
-		return true;
-	}
-}
 
 /**
  * Write per-turn metrics to the ecosystem metrics file.
@@ -201,9 +178,12 @@ async function writeTurnMetrics(
 }
 
 /**
- * Handle ecosystem (overstory) exit: write final metrics and send task_done mail.
+ * Write the final metrics _exit block on loop termination.
+ *
+ * Orchestrators consume the result via the metrics file, the NDJSON `result`
+ * event on stdout, or the process exit code — sapling does not push.
  */
-async function handleEcosystemExit(
+async function writeFinalMetrics(
 	ecosystem: EcosystemConfig | undefined,
 	exitReason: string,
 	totalTurns: number,
@@ -217,7 +197,6 @@ async function handleEcosystemExit(
 	if (!ecosystem) return;
 
 	try {
-		// Write final metrics file
 		const metricsPath = ecosystem.metricsPath ?? ".sapling/metrics.json";
 		let existingMetrics: Record<string, unknown> = {};
 		try {
@@ -243,24 +222,6 @@ async function handleEcosystemExit(
 		};
 
 		await Bun.write(metricsPath, JSON.stringify(finalMetrics, null, 2));
-
-		// Send task_done mail to orchestrator (fire-and-forget)
-		Bun.spawn(
-			[
-				"ov",
-				"mail",
-				"send",
-				"--to",
-				"eco-integ-lead",
-				"--subject",
-				`task_done: ${ecosystem.taskId}`,
-				"--body",
-				`Task ${ecosystem.taskId} completed with exit reason: ${exitReason}. Turns: ${totalTurns}`,
-				"--type",
-				"result",
-			],
-			{ stdout: "ignore", stderr: "ignore" },
-		);
 	} catch {
 		// Silently fail - exit handling is best-effort
 	}
@@ -324,7 +285,7 @@ export async function runLoop(
 
 	while (totalTurns < maxTurns) {
 		// ── Abort check — before starting a new turn ─────────────────────────
-		// Triggered by RPC abort request or external signal (SIGTERM from ov stop).
+		// Triggered by RPC abort request or external signal (SIGTERM from orchestrator).
 		if (options.rpcServer?.isAbortRequested() || options.abortSignal?.aborted) {
 			const source = options.abortSignal?.aborted ? "signal" : "RPC request";
 			logger.info(`Agent loop aborted by ${source}`);
@@ -337,7 +298,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on abort
-			await handleEcosystemExit(options.ecosystemConfig, "aborted", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "aborted", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -389,7 +350,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on error
-			await handleEcosystemExit(options.ecosystemConfig, "error", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "error", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -449,7 +410,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on task completion
-			await handleEcosystemExit(options.ecosystemConfig, "task_complete", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "task_complete", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -471,7 +432,7 @@ export async function runLoop(
 		});
 
 		// ── Step 6: Execute tools in parallel ─────────────────────────────────
-		// Fire onToolStart heartbeat — fire-and-forget (updates overstory lastActivity)
+		// Fire onToolStart heartbeat — fire-and-forget (orchestrator lastActivity hook)
 		if (options.eventConfig?.onToolStart) {
 			Bun.spawn(options.eventConfig.onToolStart, { stdout: "ignore", stderr: "ignore" });
 		}
@@ -565,7 +526,7 @@ export async function runLoop(
 			}),
 		);
 
-		// Fire onToolEnd heartbeat — fire-and-forget (updates overstory lastActivity)
+		// Fire onToolEnd heartbeat — fire-and-forget (orchestrator lastActivity hook)
 		if (options.eventConfig?.onToolEnd) {
 			Bun.spawn(options.eventConfig.onToolEnd, { stdout: "ignore", stderr: "ignore" });
 		}
@@ -629,11 +590,8 @@ export async function runLoop(
 			contextUtilization,
 		});
 
-		// ── Step 9: Ecosystem integration (overstory orchestration) ─────────────
+		// ── Step 9: Per-turn metrics for orchestrator consumers ────────────────
 		if (options.ecosystemConfig) {
-			// Check for pending mail from orchestrator
-			await checkEcosystemMail(options.ecosystemConfig);
-			// Write per-turn metrics
 			await writeTurnMetrics(
 				options.ecosystemConfig,
 				totalTurns,
@@ -670,7 +628,7 @@ export async function runLoop(
 	});
 	await fireSessionEnd(options.eventConfig?.onSessionEnd);
 	// Ecosystem exit: write final metrics on max turns
-	await handleEcosystemExit(options.ecosystemConfig, "max_turns", totalTurns, {
+	await writeFinalMetrics(options.ecosystemConfig, "max_turns", totalTurns, {
 		totalInputTokens,
 		totalOutputTokens,
 		totalCacheReadTokens,

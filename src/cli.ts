@@ -123,27 +123,24 @@ export async function runCommand(
 		rpcServer = new RpcServer(emptyStream, eventEmitter);
 	}
 
-	// Socket server: allows external tools (e.g. ov inspect) to query agent state.
+	// Socket server: lets an orchestrator (or any external tool) query live agent state.
 	let socketServer: RpcSocketServer | undefined;
 	if (opts.rpcSocket && rpcServer) {
 		socketServer = new RpcSocketServer(rpcServer);
 		await socketServer.start(opts.rpcSocket);
 	}
 
-	// Wire SIGTERM/SIGINT to AbortController for graceful shutdown (ov stop).
+	// Wire SIGTERM/SIGINT to AbortController for graceful shutdown.
 	const abortController = new AbortController();
 	const onSignal = () => abortController.abort();
 	process.on("SIGTERM", onSignal);
 	process.on("SIGINT", onSignal);
 
-	// Ecosystem integration: load from CLI options or environment variables (overstory orchestration)
-	// Priority: CLI options > SAPLING_* env vars > OVERSTORY_* env vars (fallback)
-	const ecosystemAgentName =
-		opts.agentName ?? process.env.SAPLING_AGENT_NAME ?? process.env.OVERSTORY_AGENT_NAME;
-	const ecosystemTaskId =
-		opts.taskId ?? process.env.SAPLING_TASK_ID ?? process.env.OVERSTORY_TASK_ID;
-	const ecosystemMetricsPath =
-		opts.metricsPath ?? process.env.SAPLING_METRICS_PATH ?? process.env.OVERSTORY_METRICS_PATH;
+	// Ecosystem integration: load from CLI options or SAPLING_* environment variables.
+	// Priority: CLI options > SAPLING_* env vars.
+	const ecosystemAgentName = opts.agentName ?? process.env.SAPLING_AGENT_NAME;
+	const ecosystemTaskId = opts.taskId ?? process.env.SAPLING_TASK_ID;
+	const ecosystemMetricsPath = opts.metricsPath ?? process.env.SAPLING_METRICS_PATH;
 
 	const ecosystemConfig: EcosystemConfig | undefined =
 		ecosystemAgentName && ecosystemTaskId
