@@ -7,6 +7,7 @@
  * LLM errors use exponential backoff (3 retries).
  */
 
+import { resolveProvider } from "./config.ts";
 import { extractTurnHint, SaplingPipelineV1 } from "./context/v1/pipeline.ts";
 import { ClientError } from "./errors.ts";
 import { logger } from "./logging/logger.ts";
@@ -371,8 +372,12 @@ export async function runLoop(
 		try {
 			response = await callWithRetry(client, request);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const rawMessage = err instanceof Error ? err.message : String(err);
 			const code = err instanceof ClientError ? err.code : "UNKNOWN";
+			const message =
+				code === "SDK_AUTH_FAILED"
+					? `${rawMessage} [hint: model "${options.model}" uses the ${resolveProvider(options.model)} provider — run 'sp auth set ${resolveProvider(options.model)} --key <key>' or 'sp doctor' to diagnose]`
+					: rawMessage;
 			logger.error(`Agent loop aborted: ${message}`);
 			options.eventEmitter?.emit({ type: "error", message, classification: code });
 			options.eventEmitter?.emit({
