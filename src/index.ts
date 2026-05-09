@@ -111,6 +111,9 @@ program
 					guardsFile: options.guardsFile as string | undefined,
 					rpcMode: isRpcMode,
 					dryRun: options.dryRun === true,
+					agentName: options.agentName as string | undefined,
+					taskId: options.taskId as string | undefined,
+					metricsPath: options.metricsPath as string | undefined,
 				};
 
 				const config = await loadConfig({
