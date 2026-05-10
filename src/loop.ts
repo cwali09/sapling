@@ -266,6 +266,7 @@ export async function runLoop(
 		windowSize: options.contextWindowSize ?? 200_000,
 		verbose: false,
 		tuning: options.pipelineTuning,
+		eventEmitter: options.eventEmitter,
 	});
 	// Track the pipeline-managed system prompt (updated each turn by the v1 pipeline)
 	let currentSystemPrompt = options.systemPrompt;

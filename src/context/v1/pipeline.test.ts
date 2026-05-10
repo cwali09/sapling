@@ -5,6 +5,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Message } from "../../types.ts";
 import { extractTurnHint, SaplingPipelineV1 } from "./pipeline.ts";
+import { StageRegistry } from "./registry.ts";
+import type { PipelineStage, StageContext } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -289,6 +291,101 @@ describe("SaplingPipelineV1", () => {
 			const total = counts.active + counts.completed + counts.compacted + counts.archived;
 			expect(total).toBe(output.state.operations.length);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// StageContext plumbing — currentTurn + eventEmitter
+// ---------------------------------------------------------------------------
+
+describe("process — StageContext plumbing", () => {
+	/**
+	 * Builds a registry containing a single capture stage (plus the render stage
+	 * that produces ctx.output, otherwise pipeline.process() throws). The capture
+	 * stage records every StageContext it sees so assertions can inspect the
+	 * threaded fields without depending on real pipeline behavior.
+	 */
+	function makeCaptureRegistry(captures: StageContext[]): StageRegistry {
+		const capture: PipelineStage = {
+			name: "capture",
+			execute(ctx) {
+				captures.push(ctx);
+			},
+		};
+		const render: PipelineStage = {
+			name: "render",
+			execute(ctx) {
+				ctx.output = {
+					messages: ctx.input.messages,
+					systemPrompt: ctx.input.systemPrompt,
+					state: {
+						operations: [],
+						activeOperationId: null,
+						utilization: 0,
+						budget: {
+							windowSize: ctx.windowSize,
+							systemWithArchive: 0,
+							activeOperations: 0,
+							headroom: ctx.windowSize,
+							utilization: 0,
+						},
+						operationCounts: { active: 0, completed: 0, compacted: 0, archived: 0 },
+					},
+				};
+			},
+		};
+		return new StageRegistry([capture, render]);
+	}
+
+	it("threads currentTurn from input.turnHint.turn into ctx", () => {
+		const captures: StageContext[] = [];
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+		});
+
+		pipeline.process({
+			messages: [TASK_MSG],
+			systemPrompt: BASE_PROMPT,
+			turnHint: { turn: 7, tools: [], files: [], hasError: false },
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+		pipeline.process({
+			messages: [TASK_MSG],
+			systemPrompt: BASE_PROMPT,
+			turnHint: { turn: 12, tools: [], files: [], hasError: false },
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+
+		expect(captures).toHaveLength(2);
+		expect(captures[0]?.currentTurn).toBe(7);
+		expect(captures[1]?.currentTurn).toBe(12);
+	});
+
+	it("threads the eventEmitter from PipelineOptions into ctx", () => {
+		const captures: StageContext[] = [];
+		const sink = { emit: () => {} };
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+			eventEmitter: sink,
+		});
+
+		pipeline.process(makeInput([TASK_MSG]));
+
+		expect(captures[0]?.eventEmitter).toBe(sink);
+	});
+
+	it("leaves ctx.eventEmitter undefined when no sink is provided", () => {
+		const captures: StageContext[] = [];
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+		});
+
+		pipeline.process(makeInput([TASK_MSG]));
+
+		expect(captures[0]?.eventEmitter).toBeUndefined();
 	});
 });
 

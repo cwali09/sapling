@@ -353,6 +353,16 @@ export const COMPACTION_SCORE_THRESHOLD = 0.3;
 // ---------------------------------------------------------------------------
 
 /**
+ * Structural sink for pipeline-emitted NDJSON events. Mirrors the shape of
+ * src/hooks/events.ts EventEmitter so v1 stages can emit decision events
+ * (compact, commitment_added, pipeline_stage, ...) without taking a hard
+ * dependency on src/hooks/. Keeps src/context/v1/ orchestrator-agnostic.
+ */
+export interface PipelineEventSink {
+	emit(event: Record<string, unknown>): void;
+}
+
+/**
  * Shared mutable context passed through every pipeline stage in a single
  * process() cycle. Stages read from and write to this object to communicate
  * intermediate results.
@@ -364,6 +374,17 @@ export interface StageContext {
 	windowSize: number;
 	/** Whether to emit verbose debug logs to stderr. */
 	verbose: boolean;
+	/**
+	 * 1-based turn number for this pipeline cycle. Set by SaplingPipelineV1.process()
+	 * from input.turnHint.turn so stages can tag emitted events with the originating turn.
+	 */
+	currentTurn: number;
+	/**
+	 * Optional event sink for pipeline decision events. When undefined, stages must
+	 * skip event emission (no-op). Always undefined under tests that construct a
+	 * StageContext by hand without explicitly opting in.
+	 */
+	eventEmitter?: PipelineEventSink;
 	/** Optional pipeline tuning overrides (from config cascade). */
 	tuning?: PipelineTuning;
 	/** Operation registry — mutated in place by ingest / compact / budget stages. */

@@ -27,6 +27,7 @@ function makeCtx(overrides?: Partial<StageContext>): StageContext {
 		},
 		windowSize: 200_000,
 		verbose: false,
+		currentTurn: 1,
 		operations: [],
 		activeOperationId: null,
 		budgetUtil: null,

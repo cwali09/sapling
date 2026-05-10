@@ -17,6 +17,7 @@ import type { Message } from "../../types.ts";
 import { createDefaultStageRegistry, type StageRegistry } from "./registry.ts";
 import type {
 	Operation,
+	PipelineEventSink,
 	PipelineInput,
 	PipelineOutput,
 	PipelineState,
@@ -40,6 +41,12 @@ export interface PipelineOptions {
 	registry?: StageRegistry;
 	/** Optional pipeline tuning overrides (from config cascade). */
 	tuning?: PipelineTuning;
+	/**
+	 * Optional sink for pipeline decision events (compact, commitment_added,
+	 * pipeline_stage, ...). Threaded into every StageContext via process().
+	 * Structural type — pass the loop's EventEmitter directly.
+	 */
+	eventEmitter?: PipelineEventSink;
 }
 
 /**
@@ -57,12 +64,14 @@ export class SaplingPipelineV1 {
 	private lastState: PipelineState | null = null;
 	private readonly registry: StageRegistry;
 	private readonly tuning?: PipelineTuning;
+	private readonly eventEmitter?: PipelineEventSink;
 
 	constructor(options: PipelineOptions) {
 		this.windowSize = options.windowSize;
 		this.verbose = options.verbose ?? false;
 		this.registry = options.registry ?? createDefaultStageRegistry();
 		this.tuning = options.tuning;
+		this.eventEmitter = options.eventEmitter;
 	}
 
 	/**
@@ -87,6 +96,8 @@ export class SaplingPipelineV1 {
 			input,
 			windowSize: this.windowSize,
 			verbose: this.verbose,
+			currentTurn: input.turnHint.turn,
+			eventEmitter: this.eventEmitter,
 			tuning: this.tuning,
 			operations: this.operations,
 			activeOperationId: this.activeOperationId,
