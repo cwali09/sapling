@@ -16,7 +16,7 @@ import { configure, logger } from "./logging/logger.ts";
 import { appendSessionRecord, summarizePrompt } from "./session.ts";
 import type { LlmBackend, RunOptions } from "./types.ts";
 
-export const VERSION = "0.3.1";
+export const VERSION = "0.3.2";
 
 const startTime = Date.now();
 

@@ -11,7 +11,7 @@ Sapling (`@os-eco/sapling-cli`, CLI: `sp` / `sapling`) is a headless coding agen
 All commands use **Bun** as the runtime. There is no build/compile step — TypeScript runs directly.
 
 ```bash
-bun test                  # Run all 792 tests (39 files, 2451 expect() calls)
+bun test                  # Run all 859 tests (40 files, 3076 expect() calls)
 bun test src/loop.test.ts # Run a single test file
 bun run lint              # Lint (Biome)
 bun run lint:fix          # Lint + auto-fix

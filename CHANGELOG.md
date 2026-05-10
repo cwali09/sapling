@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-10
+
+### Added
+
+#### Orchestrator Surface
+- `EcosystemConfig` type (`src/types.ts`) — generic orchestrator integration config (`agentName`, `taskId`, `metricsPath`); wired through CLI flags (`--agent-name`, `--task-id`, `--metrics-path`) and env vars (`SAPLING_AGENT_NAME`, `SAPLING_TASK_ID`, `SAPLING_METRICS_PATH`)
+- Per-turn metrics file writes plus a final `_exit` metrics record (exit reason, total turns, cumulative tokens) when an orchestrator config is present — orchestrator reads the file directly; sapling never pushes
+- SIGTERM / SIGINT graceful shutdown — wired to the loop's `AbortController`; final metrics and `onSessionEnd` lifecycle hook still fire on termination
+- `docs/event-schema.md` — full NDJSON event schema reference with payload definitions for every emitted event
+- `docs/orchestrator-migration.md` — migration note for consumers that previously relied on sapling shelling out to a specific orchestrator
+- `src/orchestrator-surface.test.ts` (880 lines) — comprehensive E2E tests covering NDJSON event stream, JSON-RPC stdin control, Unix socket state queries, guards/lifecycle hooks, metrics file, agent labeling, and graceful shutdown
+
+#### Pipeline Observability
+- `compact` event with reason taxonomy emitted from compact + budget stages (token-overflow, low-score, redundancy, etc.)
+- `commitment_added` and `commitment_resolved` events with stable commitment IDs surfaced from the v1 ingest stage
+- `pipeline_stage` events emitted under `--verbose` — per-stage diagnostic data for ingest/evaluate/compact/budget/render
+- `turn_end` event extended with `activeOperationId` and `activeOperationScore` fields
+- `EventEmitter` and `currentTurn` threaded through the v1 pipeline so stages can emit events with correct turn correlation
+- Pipeline commitments included in RPC `getState` responses (`src/rpc/socket.ts`, `src/rpc/server.ts`)
+
+#### Pipeline Tuning
+- `PipelineTuning` interface (`src/types.ts`) — optional overrides for evaluate weights (recency, file overlap, causal dependency, outcome significance, operation type), recency half-life, boundary weights/threshold, and budget allocations
+- Tuning overrides threaded through the config cascade (env → project YAML → home YAML → defaults) and wired into pipeline stage functions
+- Unset tuning fields fall back to compile-time defaults from `src/context/v1/types.ts`
+
+#### Agent Personas
+- Builder system prompt rebuilt (`agents/builder.md`) and auto-loaded by `--agent-name` — running with `--agent-name builder` no longer needs `--system-prompt-file`
+
+### Fixed
+- `sp doctor` auth check now provider-aware — surfaces a remediation hint on `SDK_AUTH_FAILED` and reports configured providers from `~/.sapling/auth.json`
+- `fileScope` guard correctly enforces path boundaries in conjunction with `abortSignal` (E2E test added in `src/hooks/e2e.test.ts`)
+- 91 failing tests in pipeline and config resolved
+- TypeScript and Biome quality gate failures from the orchestrator-surface refactor resolved
+- Biome formatting in `evaluate.ts` `buildSignals`
+
+### Changed
+- **Refactor:** Sapling decoupled from any specific orchestrator — no source file references "overstory" by name; the orchestrator surface (`docs/orchestrator-migration.md`) is now generic. CLI flags use neutral names (`--agent-name`, `--task-id`, `--metrics-path`).
+- `tools/grep.ts` rewritten — adds richer ripgrep flag coverage, JSON output mode, and concurrent stdout/stderr draining (287 lines changed)
+- `loop.ts` extended with ecosystem hooks, abort wiring, per-turn metrics writes, and event correlation (191 lines changed)
+- Test suite: 859 tests across 40 files (3076 expect() calls), up from 792/39/2451
+
 ## [0.3.1] - 2026-03-04
 
 ### Added
@@ -397,7 +438,8 @@ Initial release of Sapling — a headless coding agent with proactive context ma
 - Real temp directory helpers (`src/test-helpers.ts`)
 - Full coverage of: agent loop, context pipeline (all 5 stages), both LLM clients, all 6 tools, config validation, error hierarchy
 
-[Unreleased]: https://github.com/jayminwest/sapling/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/jayminwest/sapling/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/jayminwest/sapling/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/jayminwest/sapling/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jayminwest/sapling/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jayminwest/sapling/compare/v0.1.5...v0.2.0
