@@ -16,6 +16,7 @@
 import type { Message } from "../../types.ts";
 import { createDefaultStageRegistry, type StageRegistry } from "./registry.ts";
 import type {
+	CommitmentRecord,
 	Operation,
 	PipelineEventSink,
 	PipelineInput,
@@ -59,6 +60,7 @@ export class SaplingPipelineV1 {
 	private operations: Operation[] = [];
 	private activeOperationId: number | null = null;
 	private nextOperationId = 1;
+	private commitmentRegistry: CommitmentRecord[] = [];
 	private readonly windowSize: number;
 	private readonly verbose: boolean;
 	private lastState: PipelineState | null = null;
@@ -92,6 +94,8 @@ export class SaplingPipelineV1 {
 		}
 
 		// Build the shared stage context and run all pipeline stages.
+		// commitmentRegistry is mutated in place by the commitment-track stage,
+		// so passing the array directly keeps SaplingPipelineV1's view in sync.
 		const ctx: StageContext = {
 			input,
 			windowSize: this.windowSize,
@@ -102,6 +106,7 @@ export class SaplingPipelineV1 {
 			operations: this.operations,
 			activeOperationId: this.activeOperationId,
 			nextOperationId: this.nextOperationId,
+			commitmentRegistry: this.commitmentRegistry,
 			budgetUtil: null,
 			output: null,
 		};
@@ -112,6 +117,7 @@ export class SaplingPipelineV1 {
 		this.operations = ctx.operations;
 		this.activeOperationId = ctx.activeOperationId;
 		this.nextOperationId = ctx.nextOperationId ?? this.nextOperationId;
+		this.commitmentRegistry = ctx.commitmentRegistry;
 
 		if (!ctx.output) {
 			throw new Error(
@@ -155,6 +161,15 @@ export class SaplingPipelineV1 {
 	 */
 	getRegistry(): StageRegistry {
 		return this.registry;
+	}
+
+	/**
+	 * Return a snapshot of the commitment registry for inspection.
+	 * Returned array is a shallow copy; mutating it does not affect pipeline state.
+	 * Consumed by RPC `getState` (sapling-dda1) and tests.
+	 */
+	getCommitmentRegistry(): CommitmentRecord[] {
+		return this.commitmentRegistry.map((r) => ({ ...r }));
 	}
 }
 

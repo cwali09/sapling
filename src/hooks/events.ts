@@ -16,6 +16,10 @@
  *   error      — on failures, with message and classification
  *   compact    — when the v1 pipeline moves an op to status=compacted (score-driven)
  *                or status=archived (budget-driven)
+ *   commitment_added    — when the ingest/commitment-track stage observes a new
+ *                         commitment ID (deterministic format `c-<turn>-<n>`)
+ *   commitment_resolved — when a later operation's artifacts cover all files
+ *                         mentioned in a previously pending commitment
  *   pipeline_stage — verbose-only structured summary of each pipeline stage's run
  *                    (ingest, evaluate, compact, budget, render)
  */
@@ -176,6 +180,53 @@ export class EventEmitter {
 	}
 
 	/**
+	 * Emitted when the v1 pipeline's commitment-track stage observes a new
+	 * commitment in an operation's turn metadata.
+	 *
+	 * The commitment ID is deterministic (`c-<turn>-<n>`) so consumers can
+	 * correlate this event with a later `commitment_resolved` event for the same ID.
+	 *
+	 * @param turn         - 1-based turn number that produced the decision (currentTurn).
+	 * @param commitmentId - Stable commitment identity.
+	 * @param text         - Verbatim commitment text.
+	 * @param operationId  - ID of the operation containing the producing turn.
+	 * @param producedTurn - 1-based turn number that contained the commitment text.
+	 */
+	commitmentAdded(
+		turn: number,
+		commitmentId: string,
+		text: string,
+		operationId: number,
+		producedTurn: number,
+	): void {
+		this.emit({
+			type: "commitment_added",
+			turn,
+			commitmentId,
+			text,
+			operationId,
+			producedTurn,
+		});
+	}
+
+	/**
+	 * Emitted when a previously pending commitment becomes resolved — i.e. a
+	 * later operation (different from the one that produced the commitment)
+	 * has artifacts covering all files mentioned in the commitment text.
+	 *
+	 * @param turn          - 1-based turn number when the resolution was detected.
+	 * @param commitmentId  - Stable commitment identity.
+	 * @param resolvedBy    - { operationId, turn, files } describing what covered it.
+	 */
+	commitmentResolved(
+		turn: number,
+		commitmentId: string,
+		resolvedBy: { operationId: number; turn: number; files: string[] },
+	): void {
+		this.emit({ type: "commitment_resolved", turn, commitmentId, resolvedBy });
+	}
+
+	/**
 	 * Emitted at the end of each pipeline stage run when --verbose is on.
 	 * Structured replacement for the per-stage stderr lines emitted by registry.ts.
 	 *
@@ -188,7 +239,7 @@ export class EventEmitter {
 	 */
 	pipelineStage(
 		turn: number,
-		stage: "ingest" | "evaluate" | "compact" | "budget" | "render",
+		stage: "ingest" | "evaluate" | "compact" | "budget" | "render" | "commitment-track",
 		data: Record<string, unknown>,
 	): void {
 		this.emit({ type: "pipeline_stage", turn, stage, ...data });
