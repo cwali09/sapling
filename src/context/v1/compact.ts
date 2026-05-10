@@ -10,7 +10,7 @@
  */
 
 import { renderCompactSummary } from "./templates.ts";
-import type { Operation, PipelineTuning, Turn } from "./types.ts";
+import type { Operation, PipelineEventSink, PipelineTuning, Turn } from "./types.ts";
 import { COMPACTION_SCORE_THRESHOLD, TOOL_OUTPUT_TRUNCATION } from "./types.ts";
 
 /** Characters-per-token heuristic (matches budget.ts). */
@@ -207,15 +207,21 @@ export function truncateOperationOutputs(op: Operation, tuning?: PipelineTuning)
  * - Operations with score >= COMPACTION_SCORE_THRESHOLD have tool outputs truncated.
  * - Already-compacted or archived operations are left unchanged.
  *
- * @param operations       - The full operation registry (mutated in-place).
+ * @param operations        - The full operation registry (mutated in-place).
  * @param activeOperationId - ID of the currently active operation (never compacted).
+ * @param tuning            - Optional pipeline tuning overrides.
+ * @param eventSink         - Optional sink for `compact` events fired on score-driven compaction.
+ * @param currentTurn       - 1-based turn number stamped on emitted events. Required for emission.
  */
 export function compact(
 	operations: Operation[],
 	activeOperationId: number | null,
 	tuning?: PipelineTuning,
+	eventSink?: PipelineEventSink,
+	currentTurn?: number,
 ): void {
 	const threshold = tuning?.compactionScoreThreshold ?? COMPACTION_SCORE_THRESHOLD;
+	const canEmit = eventSink !== undefined && currentTurn !== undefined;
 
 	for (const op of operations) {
 		if (op.id === activeOperationId) {
@@ -228,7 +234,18 @@ export function compact(
 		if (op.status === "compacted" || op.status === "archived") continue;
 
 		if (op.score < threshold) {
+			const scoreAtDecision = op.score;
 			compactOperation(op);
+			if (canEmit) {
+				eventSink.emit({
+					type: "compact",
+					turn: currentTurn,
+					operationId: op.id,
+					reason: "score_below_threshold",
+					archivedAs: "compacted",
+					score: scoreAtDecision,
+				});
+			}
 		} else {
 			truncateOperationOutputs(op, tuning);
 		}

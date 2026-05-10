@@ -49,6 +49,7 @@ describe("EventEmitter", () => {
 			emitter.progress(50, "Running tests", 3);
 			emitter.result("success", "done", 1, 100, 50);
 			emitter.error("boom", "TRANSIENT");
+			emitter.compact(1, 2, "score_below_threshold", "compacted", 0.1);
 			expect(writeSpy).not.toHaveBeenCalled();
 		});
 
@@ -278,6 +279,30 @@ describe("EventEmitter", () => {
 			emitter.turnStart(1);
 			emitter.turnStart(2);
 			expect(writeSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it("compact() emits correct shape for score-driven compaction", () => {
+			const emitter = new EventEmitter(true);
+			emitter.compact(4, 7, "score_below_threshold", "compacted", 0.18);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("compact");
+			expect(parsed.turn).toBe(4);
+			expect(parsed.operationId).toBe(7);
+			expect(parsed.reason).toBe("score_below_threshold");
+			expect(parsed.archivedAs).toBe("compacted");
+			expect(parsed.score).toBe(0.18);
+		});
+
+		it("compact() emits correct shape for budget-driven archival", () => {
+			const emitter = new EventEmitter(true);
+			emitter.compact(12, 3, "budget_pressure", "archived", 0.42);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("compact");
+			expect(parsed.turn).toBe(12);
+			expect(parsed.operationId).toBe(3);
+			expect(parsed.reason).toBe("budget_pressure");
+			expect(parsed.archivedAs).toBe("archived");
+			expect(parsed.score).toBe(0.42);
 		});
 	});
 });

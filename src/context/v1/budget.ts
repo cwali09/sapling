@@ -19,6 +19,7 @@ import {
 	type BudgetUtilization,
 	MAX_SINGLE_OP_BUDGET_FRACTION,
 	type Operation,
+	type PipelineEventSink,
 	type PipelineTuning,
 	V1_BUDGET_ALLOCATIONS,
 	V1_ZONE_BOUNDS,
@@ -256,6 +257,9 @@ export function enforceArchiveBudget(
  * @param operations         - All operations in the registry (mutated in-place).
  * @param systemPromptTokens - Token count of the current system prompt.
  * @param windowSize         - Total context window size in tokens.
+ * @param tuning             - Optional pipeline tuning overrides.
+ * @param eventSink          - Optional sink for `compact` events fired on budget-driven archival.
+ * @param currentTurn        - 1-based turn number stamped on emitted events. Required for emission.
  * @returns                  - Budget utilization breakdown.
  */
 export function budget(
@@ -263,12 +267,26 @@ export function budget(
 	systemPromptTokens: number,
 	windowSize: number,
 	tuning?: PipelineTuning,
+	eventSink?: PipelineEventSink,
+	currentTurn?: number,
 ): BudgetUtilization {
 	const result = enforceBudget(operations, systemPromptTokens, windowSize, tuning);
+	const canEmit = eventSink !== undefined && currentTurn !== undefined;
 
 	// Mark archived operations in-place
 	for (const op of result.archived) {
+		const scoreAtDecision = op.score;
 		op.status = "archived";
+		if (canEmit) {
+			eventSink.emit({
+				type: "compact",
+				turn: currentTurn,
+				operationId: op.id,
+				reason: "budget_pressure",
+				archivedAs: "archived",
+				score: scoreAtDecision,
+			});
+		}
 	}
 
 	return result.budget;

@@ -14,6 +14,8 @@
  *   progress   — at meaningful milestones, with estimated percent complete and subtask label
  *   result     — when run loop exits, with outcome and summary
  *   error      — on failures, with message and classification
+ *   compact    — when the v1 pipeline moves an op to status=compacted (score-driven)
+ *                or status=archived (budget-driven)
  */
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -137,5 +139,27 @@ export class EventEmitter {
 	/** Emitted on LLM or unrecoverable errors. */
 	error(message: string, classification: string): void {
 		this.emit({ type: "error", message, classification });
+	}
+
+	/**
+	 * Emitted when the v1 pipeline moves an operation out of the active
+	 * history zone. Two reasons today:
+	 *   - score_below_threshold: compact stage compacted the op (status → "compacted")
+	 *   - budget_pressure:       budget stage archived the op (status → "archived")
+	 *
+	 * @param turn         - 1-based turn number that produced the decision.
+	 * @param operationId  - ID of the affected operation.
+	 * @param reason       - Why the op was moved.
+	 * @param archivedAs   - The new operation status.
+	 * @param score        - The op's evaluator score (0.0–1.0) at decision time.
+	 */
+	compact(
+		turn: number,
+		operationId: number,
+		reason: "score_below_threshold" | "budget_pressure",
+		archivedAs: "compacted" | "archived",
+		score: number,
+	): void {
+		this.emit({ type: "compact", turn, operationId, reason, archivedAs, score });
 	}
 }

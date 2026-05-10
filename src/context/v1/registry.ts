@@ -142,7 +142,7 @@ const evaluateStage: PipelineStage = {
 const compactStage: PipelineStage = {
 	name: "compact",
 	execute(ctx: StageContext): void {
-		compact(ctx.operations, ctx.activeOperationId, ctx.tuning);
+		compact(ctx.operations, ctx.activeOperationId, ctx.tuning, ctx.eventEmitter, ctx.currentTurn);
 
 		if (ctx.verbose) {
 			const compacted = ctx.operations.filter((op) => op.status === "compacted").length;
@@ -155,7 +155,14 @@ const budgetStage: PipelineStage = {
 	name: "budget",
 	execute(ctx: StageContext): void {
 		const systemTokens = estimateTokens(ctx.input.systemPrompt);
-		ctx.budgetUtil = budget(ctx.operations, systemTokens, ctx.windowSize, ctx.tuning);
+		ctx.budgetUtil = budget(
+			ctx.operations,
+			systemTokens,
+			ctx.windowSize,
+			ctx.tuning,
+			ctx.eventEmitter,
+			ctx.currentTurn,
+		);
 
 		if (ctx.verbose) {
 			const archived = ctx.operations.filter((op) => op.status === "archived").length;

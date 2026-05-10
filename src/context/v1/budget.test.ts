@@ -618,3 +618,138 @@ describe("enforceBudget — rebalanced zone integration", () => {
 		expect(smallSys.retained.length).toBeGreaterThanOrEqual(fullSys.retained.length);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// budget — event emission (PipelineEventSink)
+// ---------------------------------------------------------------------------
+
+describe("budget — event emission", () => {
+	function makeSink(): {
+		events: Array<Record<string, unknown>>;
+		emit: (e: Record<string, unknown>) => void;
+	} {
+		const events: Array<Record<string, unknown>> = [];
+		return {
+			events,
+			emit(e) {
+				events.push(e);
+			},
+		};
+	}
+
+	it("emits a `compact` event for each op archived under budget pressure", () => {
+		const sink = makeSink();
+		const smallWindow = 1000;
+		const smallSysBudget = Math.floor(smallWindow * V1_BUDGET_ALLOCATIONS.systemWithArchive); // 250
+
+		const active = makeOpWithTurns(0, 100, "active");
+		const completed1 = makeOpWithTurns(1, 100, "completed");
+		const completed2 = makeOpWithTurns(2, 100, "completed");
+		// Higher score wins the budget; lower score is archived.
+		completed1.score = 0.9;
+		completed2.score = 0.1;
+
+		const ops = [active, completed1, completed2];
+		budget(ops, smallSysBudget, smallWindow, undefined, sink, 8);
+
+		expect(ops[2]?.status).toBe("archived");
+		expect(sink.events).toHaveLength(1);
+		expect(sink.events[0]).toMatchObject({
+			type: "compact",
+			turn: 8,
+			operationId: 2,
+			reason: "budget_pressure",
+			archivedAs: "archived",
+		});
+		// score recorded at decision time
+		expect(sink.events[0]?.score).toBeCloseTo(0.1, 5);
+	});
+
+	it("does not emit when no ops are archived", () => {
+		const sink = makeSink();
+		const active = makeOpWithTurns(0, 1000, "active");
+		const completed = makeOpWithTurns(1, 1000, "completed");
+
+		// Large window — everything fits
+		budget([active, completed], 5000, 200_000, undefined, sink, 1);
+
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("does not emit for ops already in archived status", () => {
+		const sink = makeSink();
+		const alreadyArchived = makeOp({ id: 5, status: "archived", score: 1.0 });
+
+		budget([alreadyArchived], 1000, 200_000, undefined, sink, 2);
+
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("is a no-op for emission when no eventSink is provided", () => {
+		const smallWindow = 1000;
+		const smallSysBudget = Math.floor(smallWindow * V1_BUDGET_ALLOCATIONS.systemWithArchive);
+
+		const active = makeOpWithTurns(0, 100, "active");
+		const completed1 = makeOpWithTurns(1, 100, "completed");
+		const completed2 = makeOpWithTurns(2, 100, "completed");
+		completed1.score = 0.9;
+		completed2.score = 0.1;
+
+		// No sink — should still archive the over-budget op
+		budget([active, completed1, completed2], smallSysBudget, smallWindow);
+		expect(completed2.status).toBe("archived");
+	});
+
+	it("does not emit when sink is provided but currentTurn is undefined", () => {
+		const sink = makeSink();
+		const smallWindow = 1000;
+		const smallSysBudget = Math.floor(smallWindow * V1_BUDGET_ALLOCATIONS.systemWithArchive);
+
+		const active = makeOpWithTurns(0, 100, "active");
+		const completed1 = makeOpWithTurns(1, 100, "completed");
+		const completed2 = makeOpWithTurns(2, 100, "completed");
+		completed1.score = 0.9;
+		completed2.score = 0.1;
+
+		// sink provided but no currentTurn → no events
+		budget([active, completed1, completed2], smallSysBudget, smallWindow, undefined, sink);
+
+		expect(completed2.status).toBe("archived");
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("emits one event per archived op when many overflow the budget", () => {
+		const sink = makeSink();
+		const smallWindow = 1000;
+		const smallSysBudget = Math.floor(smallWindow * V1_BUDGET_ALLOCATIONS.systemWithArchive); // 250
+		// op budget = 250; each op = 200 → only one fits beyond active
+		const active = makeOpWithTurns(0, 50, "active");
+		const completed1 = makeOpWithTurns(1, 200, "completed");
+		const completed2 = makeOpWithTurns(2, 200, "completed");
+		const completed3 = makeOpWithTurns(3, 200, "completed");
+		completed1.score = 0.9;
+		completed2.score = 0.5;
+		completed3.score = 0.1;
+
+		budget(
+			[active, completed1, completed2, completed3],
+			smallSysBudget,
+			smallWindow,
+			undefined,
+			sink,
+			12,
+		);
+
+		const archivedIds = sink.events.map((e) => e.operationId).sort();
+		const archivedOps = [completed1, completed2, completed3]
+			.filter((o) => o.status === "archived")
+			.map((o) => o.id)
+			.sort();
+		expect(archivedIds).toEqual(archivedOps);
+		for (const event of sink.events) {
+			expect(event.reason).toBe("budget_pressure");
+			expect(event.archivedAs).toBe("archived");
+			expect(event.turn).toBe(12);
+		}
+	});
+});
