@@ -45,7 +45,7 @@ describe("EventEmitter", () => {
 			emitter.turnStart(1);
 			emitter.toolStart(1, "bash", "t1", "{}");
 			emitter.toolEnd(1, "bash", "t1", true, 42);
-			emitter.turnEnd(1, 100, 50, 0, 0, "claude", 0.5);
+			emitter.turnEnd(1, 100, 50, 0, 0, "claude", 0.5, null, null);
 			emitter.progress(50, "Running tests", 3);
 			emitter.result("success", "done", 1, 100, 50);
 			emitter.error("boom", "TRANSIENT");
@@ -197,7 +197,7 @@ describe("EventEmitter", () => {
 
 		it("turnEnd() emits correct shape with all token fields and model", () => {
 			const emitter = new EventEmitter(true);
-			emitter.turnEnd(2, 500, 100, 20, 10, "claude-sonnet-4-6", 0.45);
+			emitter.turnEnd(2, 500, 100, 20, 10, "claude-sonnet-4-6", 0.45, 3, 0.78);
 			const parsed = parseFirstEvent(writeSpy);
 			expect(parsed.type).toBe("turn_end");
 			expect(parsed.turn).toBe(2);
@@ -207,6 +207,18 @@ describe("EventEmitter", () => {
 			expect(parsed.cacheWriteTokens).toBe(10);
 			expect(parsed.model).toBe("claude-sonnet-4-6");
 			expect(parsed.contextUtilization).toBe(0.45);
+			expect(parsed.activeOperationId).toBe(3);
+			expect(parsed.activeOperationScore).toBe(0.78);
+			expect(parsed.score).toBe(0.78);
+		});
+
+		it("turnEnd() emits null active-op fields when no operation is active", () => {
+			const emitter = new EventEmitter(true);
+			emitter.turnEnd(1, 0, 0, 0, 0, "model-x", 0, null, null);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.activeOperationId).toBeNull();
+			expect(parsed.activeOperationScore).toBeNull();
+			expect(parsed.score).toBeNull();
 		});
 
 		it("result() emits correct shape for success outcome", () => {

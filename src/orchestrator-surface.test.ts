@@ -165,6 +165,63 @@ describe("orchestrator surface E2E", () => {
 		expect(types).not.toContain("tool_end");
 	});
 
+	// ── 2b. turn_end payloads carry active-operation telemetry ─────────────────
+	// Warren V2 (per plan pl-c3fc) consumes activeOperationId / activeOperationScore
+	// (and the documented `score` alias) on every turn_end to render per-turn
+	// pipeline relevance. Acceptance: ≥3 turns, every turn_end carries the fields.
+
+	it("turn_end payloads include activeOperationId, activeOperationScore, and `score` alias", async () => {
+		const fileA = join(testDir, "a.txt");
+		const fileB = join(testDir, "b.txt");
+		await Bun.write(fileA, "alpha");
+		await Bun.write(fileB, "beta");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Three turns: read fileA → read fileB → final text response.
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: fileA }, "tc-1"),
+			mockToolUseResponse("read", { file_path: fileB }, "tc-2"),
+			mockTextResponse("All read."),
+		]);
+
+		const tools = createDefaultRegistry();
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 5 }),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const turnEnds = events.filter((e) => e.type === "turn_end");
+		expect(turnEnds.length).toBeGreaterThanOrEqual(3);
+
+		for (const evt of turnEnds) {
+			// Fields must always be present (number | null), not undefined / missing.
+			expect("activeOperationId" in evt).toBe(true);
+			expect("activeOperationScore" in evt).toBe(true);
+			expect("score" in evt).toBe(true);
+
+			const id = evt.activeOperationId;
+			const score = evt.activeOperationScore;
+			expect(id === null || typeof id === "number").toBe(true);
+			expect(score === null || typeof score === "number").toBe(true);
+
+			// `score` is documented as an alias of activeOperationScore.
+			expect(evt.score).toBe(score as number | null);
+		}
+
+		// At least one turn ran inside an operation (the read tool calls form one).
+		const withActiveOp = turnEnds.filter((e) => e.activeOperationId !== null);
+		expect(withActiveOp.length).toBeGreaterThan(0);
+		for (const evt of withActiveOp) {
+			expect(typeof evt.activeOperationScore).toBe("number");
+			expect(evt.activeOperationScore).toBeGreaterThanOrEqual(0);
+			expect(evt.activeOperationScore).toBeLessThanOrEqual(1);
+		}
+	});
+
 	// ── 3. Guards + eventConfig: onSessionEnd fires ────────────────────────────
 	// Orchestrators wire eventConfig.onSessionEnd to a script for session bookkeeping.
 

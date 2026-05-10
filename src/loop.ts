@@ -9,6 +9,7 @@
 
 import { resolveProvider } from "./config.ts";
 import { extractTurnHint, SaplingPipelineV1 } from "./context/v1/pipeline.ts";
+import type { PipelineState } from "./context/v1/types.ts";
 import { ClientError } from "./errors.ts";
 import { logger } from "./logging/logger.ts";
 import type {
@@ -123,6 +124,25 @@ function extractFilesModified(
 	}
 	if (toolName === "bash") return [];
 	return undefined;
+}
+
+/**
+ * Resolve the active operation's id and current evaluator score from a pipeline state.
+ * Returns null/null when there is no state yet, no active operation, or the active
+ * operation cannot be located (which would only happen if state is internally inconsistent).
+ */
+function deriveActiveOpInfo(state: PipelineState | null): {
+	activeOperationId: number | null;
+	activeOperationScore: number | null;
+} {
+	if (!state || state.activeOperationId === null) {
+		return { activeOperationId: null, activeOperationScore: null };
+	}
+	const op = state.operations.find((o) => o.id === state.activeOperationId);
+	return {
+		activeOperationId: state.activeOperationId,
+		activeOperationScore: op ? op.score : null,
+	};
 }
 
 // ─── Lifecycle Hook Helpers ───────────────────────────────────────────────────
@@ -390,8 +410,10 @@ export async function runLoop(
 				inputTokens: totalInputTokens,
 				outputTokens: totalOutputTokens,
 			});
-			// Use last pipeline state for utilization
-			const contextUtilization = pipeline.getState()?.utilization ?? 0;
+			// Use last pipeline state for utilization + active operation info
+			const finalState = pipeline.getState();
+			const contextUtilization = finalState?.utilization ?? 0;
+			const { activeOperationId, activeOperationScore } = deriveActiveOpInfo(finalState);
 			options.eventEmitter?.emit({
 				type: "turn_end",
 				turn: totalTurns,
@@ -401,6 +423,9 @@ export async function runLoop(
 				cacheWriteTokens: response.usage.cacheCreationTokens ?? 0,
 				model: response.model,
 				contextUtilization,
+				activeOperationId,
+				activeOperationScore,
+				score: activeOperationScore,
 			});
 			options.eventEmitter?.emit({
 				type: "result",
@@ -568,6 +593,7 @@ export async function runLoop(
 		messages.splice(0, messages.length, ...(pipelineResult.messages as LoopMessage[]));
 		currentSystemPrompt = pipelineResult.systemPrompt;
 		const contextUtilization = pipelineResult.state.utilization;
+		const { activeOperationId, activeOperationScore } = deriveActiveOpInfo(pipelineResult.state);
 
 		// Update RPC server with pipeline state for getState responses
 		const rpcState = pipeline.getRpcState() ?? undefined;
@@ -579,7 +605,8 @@ export async function runLoop(
 
 		options.setState?.({ turn: totalTurns, phase: "idle" });
 
-		// Emit turn_end with cumulative token counts and context utilization ratio
+		// Emit turn_end with cumulative token counts, context utilization ratio,
+		// and the active operation's id + score (alias `score`) at end-of-turn.
 		options.eventEmitter?.emit({
 			type: "turn_end",
 			turn: totalTurns,
@@ -589,6 +616,9 @@ export async function runLoop(
 			cacheWriteTokens: response.usage.cacheCreationTokens ?? 0,
 			model: response.model,
 			contextUtilization,
+			activeOperationId,
+			activeOperationScore,
+			score: activeOperationScore,
 		});
 
 		// ── Step 9: Per-turn metrics for orchestrator consumers ────────────────

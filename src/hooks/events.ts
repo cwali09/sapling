@@ -85,7 +85,12 @@ export class EventEmitter {
 	/**
 	 * Emitted at the end of each turn after context management runs.
 	 * Token counts are cumulative totals; cache counts are from the most recent LLM response.
-	 * @param contextUtilization - Ratio of total context used (0.0–1.0).
+	 *
+	 * @param contextUtilization    - Ratio of total context used (0.0–1.0).
+	 * @param activeOperationId     - ID of the operation the turn ended inside (null if none).
+	 * @param activeOperationScore  - Evaluator score (0.0–1.0) of the active operation at end of turn,
+	 *                                or null when there is no active operation. The seed-requested
+	 *                                `score` field is emitted as an alias of this value.
 	 */
 	turnEnd(
 		turn: number,
@@ -95,6 +100,8 @@ export class EventEmitter {
 		cacheWriteTokens: number,
 		model: string,
 		contextUtilization: number,
+		activeOperationId: number | null,
+		activeOperationScore: number | null,
 	): void {
 		this.emit({
 			type: "turn_end",
@@ -105,6 +112,9 @@ export class EventEmitter {
 			cacheWriteTokens,
 			model,
 			contextUtilization,
+			activeOperationId,
+			activeOperationScore,
+			score: activeOperationScore,
 		});
 	}
 
