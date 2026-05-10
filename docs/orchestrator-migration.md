@@ -81,7 +81,8 @@ After porting, the orchestrator should be able to reproduce its prior end-to-end
 
 ## See also
 
+- `docs/event-schema.md` — NDJSON event reference (every type, payload shape, fire conditions, CLI gating).
 - `src/orchestrator-surface.test.ts` — E2E tests asserting the contract above.
-- `src/hooks/events.ts` — NDJSON event shape reference.
+- `src/hooks/events.ts` — NDJSON event emitter source of truth.
 - `src/rpc/types.ts` — JSON-RPC request/response shapes.
 - `sapling/CLAUDE.md` § "Orchestrator integration surface" — surface index.

@@ -28,7 +28,7 @@ import {
 	mockToolUseResponse,
 } from "./test-helpers.ts";
 import { createDefaultRegistry } from "./tools/index.ts";
-import type { EventConfig, GuardConfig, LoopOptions } from "./types.ts";
+import type { EventConfig, GuardConfig, LlmResponse, LoopOptions } from "./types.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -570,6 +570,255 @@ describe("orchestrator surface E2E", () => {
 
 		expect(result.exitReason).toBe("aborted");
 		expect(result.totalTurns).toBe(0);
+	});
+
+	// ── 11a. Pipeline decision events: `compact` ───────────────────────────────
+	// Warren V2 (per plan pl-c3fc) consumes `compact` events to render compaction
+	// activity in its UI. Acceptance: an event with `reason: "score_below_threshold"`
+	// and `archivedAs: "compacted"` fires when older ops drop below the threshold.
+
+	it("emits `compact` events when older ops drop below the configured score threshold", async () => {
+		const fileA = join(testDir, "alpha.ts");
+		const fileB = join(testDir, "beta.ts");
+		const fileC = join(testDir, "gamma.ts");
+		await Bun.write(fileA, "alpha");
+		await Bun.write(fileB, "beta");
+		await Bun.write(fileC, "gamma");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Three distinct file scopes encourage operation boundaries between turns.
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: fileA }, "tc-1"),
+			mockToolUseResponse("read", { file_path: fileB }, "tc-2"),
+			mockToolUseResponse("read", { file_path: fileC }, "tc-3"),
+			mockTextResponse("All read."),
+		]);
+
+		const tools = createDefaultRegistry();
+		// boundaryThreshold=0 forces every turn into a new operation (so older ops
+		// complete and become compaction-eligible). compactionScoreThreshold=0.99
+		// then forces every completed op below the active one to compact, since
+		// scores are clamped to [0,1] and the active op is exempt.
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, {
+				eventEmitter: emitter,
+				maxTurns: 6,
+				pipelineTuning: { boundaryThreshold: 0, compactionScoreThreshold: 0.99 },
+			}),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const compactEvents = events.filter((e) => e.type === "compact");
+		expect(compactEvents.length).toBeGreaterThan(0);
+
+		for (const evt of compactEvents) {
+			expect(["score_below_threshold", "budget_pressure"]).toContain(evt.reason as string);
+			expect(["compacted", "archived"]).toContain(evt.archivedAs as string);
+			expect(typeof evt.operationId).toBe("number");
+			expect(typeof evt.turn).toBe("number");
+			expect(typeof evt.score).toBe("number");
+			expect(evt.score as number).toBeGreaterThanOrEqual(0);
+			expect(evt.score as number).toBeLessThanOrEqual(1);
+		}
+
+		// At least one event should be score-driven (the threshold trigger we set up).
+		const scoreDriven = compactEvents.find((e) => e.reason === "score_below_threshold");
+		expect(scoreDriven).toBeDefined();
+		expect(scoreDriven?.archivedAs).toBe("compacted");
+	});
+
+	// ── 11b. Pipeline decision events: `commitment_added` ──────────────────────
+	// The commitment-track stage extracts future-action promises from assistant
+	// text and emits `commitment_added` with a deterministic `c-<turn>-<n>` id.
+
+	it("emits `commitment_added` for future-action assistant text", async () => {
+		const targetFile = join(testDir, "target.ts");
+		await Bun.write(targetFile, "old content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Numbered-list commitment in assistant text — the most reliable extractor input.
+		// COMMITMENT_FILE_PATTERN matches `target.ts` (extension allow-list).
+		const responseWithCommitment: LlmResponse = {
+			content: [
+				{
+					type: "text",
+					text: "Plan:\n1. Edit target.ts to update the data",
+				},
+				{ type: "tool_use", id: "tc-1", name: "read", input: { file_path: targetFile } },
+			],
+			usage: { inputTokens: 100, outputTokens: 50 },
+			model: "mock-model",
+			stopReason: "tool_use",
+		};
+
+		const client = createMockClient([responseWithCommitment, mockTextResponse("Read.")]);
+
+		const tools = createDefaultRegistry();
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 5 }),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const added = events.filter((e) => e.type === "commitment_added");
+		expect(added.length).toBeGreaterThan(0);
+
+		const evt = added[0] as Record<string, unknown>;
+		expect(typeof evt.commitmentId).toBe("string");
+		expect(evt.commitmentId).toMatch(/^c-\d+-\d+$/);
+		expect(typeof evt.text).toBe("string");
+		expect(evt.text).toContain("target.ts");
+		expect(typeof evt.operationId).toBe("number");
+		expect(typeof evt.producedTurn).toBe("number");
+		expect(evt.producedTurn).toBe(1);
+	});
+
+	// ── 11c. Pipeline decision events: `pipeline_stage` (verbose-gated) ────────
+	// Under --verbose, every pipeline stage emits a structured summary event.
+	// Without verbose, no pipeline_stage events fire (matches existing stderr behavior).
+
+	it("emits `pipeline_stage` events for every stage when verbose=true", async () => {
+		const filePath = join(testDir, "data.ts");
+		await Bun.write(filePath, "content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: filePath }, "tc-1"),
+			mockTextResponse("Done."),
+		]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, verbose: true, maxTurns: 4 }),
+		);
+
+		const stageEvents = events.filter((e) => e.type === "pipeline_stage");
+		const stages = new Set(stageEvents.map((e) => e.stage));
+		// Default registry runs ingest → commitment-track → evaluate → compact → budget → render.
+		expect(stages.has("ingest")).toBe(true);
+		expect(stages.has("commitment-track")).toBe(true);
+		expect(stages.has("evaluate")).toBe(true);
+		expect(stages.has("compact")).toBe(true);
+		expect(stages.has("budget")).toBe(true);
+		expect(stages.has("render")).toBe(true);
+
+		for (const evt of stageEvents) {
+			expect(typeof evt.turn).toBe("number");
+			expect(typeof evt.stage).toBe("string");
+		}
+	});
+
+	it("emits no `pipeline_stage` events when verbose is off", async () => {
+		const filePath = join(testDir, "data.ts");
+		await Bun.write(filePath, "content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: filePath }, "tc-1"),
+			mockTextResponse("Done."),
+		]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 4 }),
+		);
+
+		const stageEvents = events.filter((e) => e.type === "pipeline_stage");
+		expect(stageEvents.length).toBe(0);
+	});
+
+	// ── 11d. RPC getState response includes pipeline.commitments ───────────────
+	// External tools polling the unix socket get the commitment registry alongside
+	// the rest of the pipeline state. Capped at MAX_RPC_COMMITMENTS (50).
+
+	it("includes pipeline.commitments in getState responses after the loop runs", async () => {
+		const targetFile = join(testDir, "target.ts");
+		await Bun.write(targetFile, "old content");
+
+		const { emitter } = createCapturingEmitter();
+
+		// Run the loop with an RpcServer so its pipeline state is populated.
+		const emptyStream = new ReadableStream<Uint8Array>({
+			start(c) {
+				c.close();
+			},
+		});
+		const rpcServer = new RpcServer(emptyStream, emitter);
+
+		const responseWithCommitment: LlmResponse = {
+			content: [
+				{ type: "text", text: "Plan:\n1. Edit target.ts to update the data" },
+				{ type: "tool_use", id: "tc-1", name: "read", input: { file_path: targetFile } },
+			],
+			usage: { inputTokens: 100, outputTokens: 50 },
+			model: "mock-model",
+			stopReason: "tool_use",
+		};
+		const client = createMockClient([responseWithCommitment, mockTextResponse("Read.")]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, rpcServer, maxTurns: 5 }),
+		);
+
+		// Now query the socket and assert the response shape.
+		const socketPath = join(testDir, "rpc-commitments.sock");
+		const socketServer = new RpcSocketServer(rpcServer);
+		try {
+			await socketServer.start(socketPath);
+
+			const response = await new Promise<string>((resolve, reject) => {
+				let buf = "";
+				Bun.connect({
+					unix: socketPath,
+					socket: {
+						open(socket) {
+							socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getState" })}\n`);
+						},
+						data(_socket, chunk) {
+							buf += new TextDecoder().decode(chunk);
+							if (buf.includes("\n")) resolve(buf.trim());
+						},
+						error(_socket, err) {
+							reject(err);
+						},
+					},
+				});
+				setTimeout(() => resolve(buf.trim()), 2000);
+			});
+
+			const parsed = JSON.parse(response);
+			expect(parsed.result).toBeDefined();
+			expect(parsed.result.pipeline).toBeDefined();
+			// commitments is always present on pipeline state once the v1 pipeline has run.
+			expect(Array.isArray(parsed.result.pipeline.commitments)).toBe(true);
+			expect(parsed.result.pipeline.commitments.length).toBeGreaterThan(0);
+			expect(parsed.result.pipeline.commitments.length).toBeLessThanOrEqual(50);
+
+			const sample = parsed.result.pipeline.commitments[0];
+			expect(typeof sample.id).toBe("string");
+			expect(sample.id).toMatch(/^c-\d+-\d+$/);
+			expect(typeof sample.turn).toBe("number");
+			expect(typeof sample.text).toBe("string");
+			expect(["pending", "resolved"]).toContain(sample.status);
+		} finally {
+			await socketServer.stop();
+		}
 	});
 
 	// ── 12. Full subprocess E2E (gated) ────────────────────────────────────────

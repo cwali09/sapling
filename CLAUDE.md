@@ -85,7 +85,7 @@ Three system prompt files emitted by Canopy: **builder** (writes code), **review
 
 Sapling is orchestrator-agnostic: it does not call any external tool, name a specific orchestrator in source, or assume a particular runtime layout. Any orchestrator that wants to drive sapling subprocesses uses these documented surfaces:
 
-- **NDJSON event stream (`--json`)** — per-turn structured events on stdout: `ready`, `turn_start`, `turn_end`, `tool_start`, `tool_end`, `progress`, `result`, `error`. Each line is a single JSON object with a `timestamp` field. See `src/hooks/events.ts`.
+- **NDJSON event stream (`--json`)** — per-turn structured events on stdout: run lifecycle (`ready`, `turn_start`, `turn_end`, `progress`, `result`, `error`), tool execution (`tool_start`, `tool_end`), pipeline decisions (`compact`, `commitment_added`, `commitment_resolved`, `pipeline_stage` under `--verbose`). Each line is a single JSON object with a `timestamp` field. See `docs/event-schema.md` for the full payload reference and `src/hooks/events.ts` for the emitter.
 - **JSON-RPC stdin control (`--mode rpc`)** — orchestrator pushes `steer` (inject context into the current turn), `followUp` (queue a new user message), `abort` (terminate the loop) as NDJSON requests over stdin. See `src/rpc/`.
 - **Unix socket state queries (`--rpc-socket <path>`)** — exposes `getState` so external tools can read live agent state (current phase, pipeline utilization) without consuming the stdin channel. See `src/rpc/socket.ts`.
 - **Guards + lifecycle hooks (`--guards-file <path>`)** — `guards.json` declares `blockedTools`, `readOnly`, `pathBoundary`, `fileScope`, `blockedBashPatterns`, plus optional `eventConfig` argv hooks (`onToolStart`, `onToolEnd`, `onSessionEnd`) that fire as subprocesses. See `src/hooks/`.
@@ -93,7 +93,7 @@ Sapling is orchestrator-agnostic: it does not call any external tool, name a spe
 - **Agent labeling (`--agent-name`, `--task-id`, `SAPLING_AGENT_NAME`, `SAPLING_TASK_ID`, `SAPLING_METRICS_PATH`)** — generic labels surfaced on events and metrics; no semantics beyond identification.
 - **Graceful shutdown (SIGTERM/SIGINT)** — wired to the loop's `AbortController`; final metrics + `onSessionEnd` still fire.
 
-The end-to-end test for this surface lives at `src/orchestrator-surface.test.ts`. See `docs/orchestrator-migration.md` for the migration note covering consumers that previously relied on sapling shelling out.
+The end-to-end test for this surface lives at `src/orchestrator-surface.test.ts`. See `docs/event-schema.md` for the NDJSON event reference and `docs/orchestrator-migration.md` for the migration note covering consumers that previously relied on sapling shelling out.
 
 ## Key Conventions
 
