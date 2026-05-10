@@ -284,7 +284,7 @@ export async function runLoop(
 	// Base system prompt is kept immutable; pipeline returns a composed version each turn
 	const pipeline = new SaplingPipelineV1({
 		windowSize: options.contextWindowSize ?? 200_000,
-		verbose: false,
+		verbose: options.verbose ?? false,
 		tuning: options.pipelineTuning,
 		eventEmitter: options.eventEmitter,
 	});

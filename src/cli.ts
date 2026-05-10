@@ -205,6 +205,7 @@ export async function runCommand(
 		abortSignal: abortController.signal,
 		ecosystemConfig,
 		pipelineTuning: config.pipelineTuning,
+		verbose: config.verbose,
 	};
 
 	try {

@@ -16,6 +16,8 @@
  *   error      — on failures, with message and classification
  *   compact    — when the v1 pipeline moves an op to status=compacted (score-driven)
  *                or status=archived (budget-driven)
+ *   pipeline_stage — verbose-only structured summary of each pipeline stage's run
+ *                    (ingest, evaluate, compact, budget, render)
  */
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -171,5 +173,24 @@ export class EventEmitter {
 		score: number,
 	): void {
 		this.emit({ type: "compact", turn, operationId, reason, archivedAs, score });
+	}
+
+	/**
+	 * Emitted at the end of each pipeline stage run when --verbose is on.
+	 * Structured replacement for the per-stage stderr lines emitted by registry.ts.
+	 *
+	 * Stage-specific metadata is spread alongside the type/turn/stage fields. Consumers
+	 * should treat unknown fields as forward-compatible additions.
+	 *
+	 * @param turn  - 1-based turn number that produced the stage execution.
+	 * @param stage - Which pipeline stage just ran.
+	 * @param data  - Stage-specific metadata (operation counts, scores, utilization, ...).
+	 */
+	pipelineStage(
+		turn: number,
+		stage: "ingest" | "evaluate" | "compact" | "budget" | "render",
+		data: Record<string, unknown>,
+	): void {
+		this.emit({ type: "pipeline_stage", turn, stage, ...data });
 	}
 }

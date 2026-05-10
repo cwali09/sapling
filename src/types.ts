@@ -106,6 +106,8 @@ export interface LoopOptions {
 	ecosystemConfig?: EcosystemConfig;
 	/** Optional pipeline tuning overrides. */
 	pipelineTuning?: PipelineTuning;
+	/** When true, the v1 pipeline emits per-stage verbose diagnostics (stderr + pipeline_stage events). */
+	verbose?: boolean;
 }
 
 // ─── Pipeline Tuning ─────────────────────────────────────────────────────────

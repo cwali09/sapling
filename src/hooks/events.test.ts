@@ -316,5 +316,38 @@ describe("EventEmitter", () => {
 			expect(parsed.archivedAs).toBe("archived");
 			expect(parsed.score).toBe(0.42);
 		});
+
+		it("pipelineStage() emits correct shape with stage-specific metadata spread", () => {
+			const emitter = new EventEmitter(true);
+			emitter.pipelineStage(7, "evaluate", { operationCount: 3, topK: 10 });
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("pipeline_stage");
+			expect(parsed.turn).toBe(7);
+			expect(parsed.stage).toBe("evaluate");
+			expect(parsed.operationCount).toBe(3);
+			expect(parsed.topK).toBe(10);
+		});
+
+		it("pipelineStage() supports each canonical stage name", () => {
+			const emitter = new EventEmitter(true);
+			const stages = ["ingest", "evaluate", "compact", "budget", "render"] as const;
+			for (const stage of stages) {
+				emitter.pipelineStage(1, stage, {});
+			}
+			expect(writeSpy).toHaveBeenCalledTimes(stages.length);
+			for (let i = 0; i < stages.length; i++) {
+				const written = (writeSpy.mock.calls[i] as [string])[0];
+				const parsed = JSON.parse(written.trim()) as Record<string, unknown>;
+				expect(parsed.stage).toBe(stages[i] as string);
+			}
+		});
+	});
+
+	describe("when disabled — pipelineStage", () => {
+		it("pipelineStage() is a no-op when disabled", () => {
+			const emitter = new EventEmitter(false);
+			emitter.pipelineStage(1, "ingest", { operationCount: 0 });
+			expect(writeSpy).not.toHaveBeenCalled();
+		});
 	});
 });

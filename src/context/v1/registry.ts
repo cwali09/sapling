@@ -100,6 +100,26 @@ export class StageRegistry {
 // Default stage implementations
 // ---------------------------------------------------------------------------
 
+/** Per-stage cap on `evaluate` event payload size to bound NDJSON volume on long sessions. */
+const EVALUATE_EVENT_TOP_K = 10;
+
+/**
+ * Emit a structured `pipeline_stage` event when an event sink is wired.
+ * Caller already gates on `ctx.verbose`; this is a no-op when no sink is present.
+ */
+function emitPipelineStage(
+	ctx: StageContext,
+	stage: "ingest" | "evaluate" | "compact" | "budget" | "render",
+	data: Record<string, unknown>,
+): void {
+	ctx.eventEmitter?.emit({
+		type: "pipeline_stage",
+		turn: ctx.currentTurn,
+		stage,
+		...data,
+	});
+}
+
 const ingestStage: PipelineStage = {
 	name: "ingest",
 	execute(ctx: StageContext): void {
@@ -116,10 +136,16 @@ const ingestStage: PipelineStage = {
 
 		if (ctx.verbose) {
 			const activeOp = ctx.operations.find((op) => op.id === ctx.activeOperationId);
+			const activeTurns = activeOp?.turns.length ?? 0;
 			console.error(
 				`[pipeline-v1] ingest: ${ctx.operations.length} ops, active=${ctx.activeOperationId}, ` +
-					`turns=${activeOp?.turns.length ?? 0}`,
+					`turns=${activeTurns}`,
 			);
+			emitPipelineStage(ctx, "ingest", {
+				operationCount: ctx.operations.length,
+				activeOperationId: ctx.activeOperationId,
+				activeOperationTurns: activeTurns,
+			});
 		}
 	},
 };
@@ -135,6 +161,20 @@ const evaluateStage: PipelineStage = {
 					`[pipeline-v1] evaluate: op#${op.id} (${op.type}) score=${op.score.toFixed(3)} status=${op.status}`,
 				);
 			}
+			const topOps = [...ctx.operations]
+				.sort((a, b) => b.score - a.score)
+				.slice(0, EVALUATE_EVENT_TOP_K)
+				.map((op) => ({
+					id: op.id,
+					type: op.type,
+					score: op.score,
+					status: op.status,
+				}));
+			emitPipelineStage(ctx, "evaluate", {
+				operationCount: ctx.operations.length,
+				operations: topOps,
+				topK: EVALUATE_EVENT_TOP_K,
+			});
 		}
 	},
 };
@@ -147,6 +187,7 @@ const compactStage: PipelineStage = {
 		if (ctx.verbose) {
 			const compacted = ctx.operations.filter((op) => op.status === "compacted").length;
 			console.error(`[pipeline-v1] compact: ${compacted} ops compacted`);
+			emitPipelineStage(ctx, "compact", { compactedCount: compacted });
 		}
 	},
 };
@@ -169,6 +210,10 @@ const budgetStage: PipelineStage = {
 			console.error(
 				`[pipeline-v1] budget: utilization=${(ctx.budgetUtil.utilization * 100).toFixed(1)}%, archived=${archived}`,
 			);
+			emitPipelineStage(ctx, "budget", {
+				utilization: ctx.budgetUtil.utilization,
+				archivedCount: archived,
+			});
 		}
 	},
 };
@@ -199,6 +244,10 @@ const renderStage: PipelineStage = {
 				`[pipeline-v1] render: ${ctx.output.messages.length} messages, ` +
 					`${archivedOps.length} archive entries`,
 			);
+			emitPipelineStage(ctx, "render", {
+				messageCount: ctx.output.messages.length,
+				archiveEntryCount: archivedOps.length,
+			});
 		}
 	},
 };

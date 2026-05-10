@@ -2,9 +2,11 @@
  * Tests for StageRegistry — the composable stage container for the v1 pipeline.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import type { Message } from "../../types.ts";
+import { SaplingPipelineV1 } from "./pipeline.ts";
 import { createDefaultStageRegistry, StageRegistry } from "./registry.ts";
-import type { PipelineStage, StageContext } from "./types.ts";
+import type { PipelineInput, PipelineStage, StageContext } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -269,5 +271,243 @@ describe("createDefaultStageRegistry", () => {
 		reg.remove("compact");
 		expect(reg.has("compact")).toBe(false);
 		expect(reg.list()).toHaveLength(4);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// pipeline_stage events (verbose-gated)
+// ---------------------------------------------------------------------------
+
+describe("default stages — pipeline_stage events", () => {
+	function makeAssistantMsg(
+		tools: Array<{ name: string; path?: string }>,
+	): Message & { role: "assistant" } {
+		return {
+			role: "assistant",
+			content: tools.map((t) => ({
+				type: "tool_use" as const,
+				id: `tu_${t.name}`,
+				name: t.name,
+				input: t.path ? { path: t.path } : {},
+			})),
+		};
+	}
+
+	function makeUserMsg(toolIds: string[]): Message & { role: "user" } {
+		const blocks = toolIds.map((id) => ({
+			type: "tool_result" as const,
+			tool_use_id: id,
+			content: "ok",
+		})) as unknown as import("../../types.ts").ContentBlock[];
+		return { role: "user", content: blocks };
+	}
+
+	const TASK: Message = { role: "user", content: "do work" };
+
+	function makeInput(messages: Message[], turn: number): PipelineInput {
+		return {
+			messages,
+			systemPrompt: "You are Sapling.",
+			turnHint: { turn, tools: [], files: [], hasError: false },
+			usage: { inputTokens: 10, outputTokens: 5 },
+		};
+	}
+
+	function makeSink(): {
+		events: Array<Record<string, unknown>>;
+		emit: (e: Record<string, unknown>) => void;
+	} {
+		const events: Array<Record<string, unknown>> = [];
+		return {
+			events,
+			emit(e) {
+				events.push(e);
+			},
+		};
+	}
+
+	// Silence the verbose stderr lines so test output stays clean.
+	let errorSpy: ReturnType<typeof spyOn>;
+	beforeEach(() => {
+		errorSpy = spyOn(console, "error").mockImplementation(() => {});
+	});
+	afterEach(() => {
+		errorSpy.mockRestore();
+	});
+
+	it("emits one pipeline_stage event per stage when verbose=true", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read", path: "src/foo.ts" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const stages = sink.events.filter((e) => e.type === "pipeline_stage").map((e) => e.stage);
+		expect(stages).toEqual(["ingest", "evaluate", "compact", "budget", "render"]);
+	});
+
+	it("emits zero pipeline_stage events when verbose=false", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: false,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read", path: "src/foo.ts" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const stageEvents = sink.events.filter((e) => e.type === "pipeline_stage");
+		expect(stageEvents).toHaveLength(0);
+	});
+
+	it("stage events carry the originating turn number", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 9));
+
+		const stageEvents = sink.events.filter((e) => e.type === "pipeline_stage");
+		expect(stageEvents.length).toBe(5);
+		for (const event of stageEvents) {
+			expect(event.turn).toBe(9);
+		}
+	});
+
+	it("ingest event carries operationCount, activeOperationId, activeOperationTurns", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read", path: "src/a.ts" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const ingestEvent = sink.events.find(
+			(e) => e.type === "pipeline_stage" && e.stage === "ingest",
+		);
+		expect(ingestEvent).toBeDefined();
+		expect(typeof ingestEvent?.operationCount).toBe("number");
+		expect(ingestEvent?.operationCount).toBeGreaterThan(0);
+		expect("activeOperationId" in (ingestEvent as object)).toBe(true);
+		expect(typeof ingestEvent?.activeOperationTurns).toBe("number");
+	});
+
+	it("evaluate event carries operations array capped at top-K", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		// Build many operations across distinct file scopes to push past top-K.
+		const messages: Message[] = [TASK];
+		for (let i = 0; i < 15; i++) {
+			messages.push(makeAssistantMsg([{ name: "read", path: `src/file${i}.ts` }]));
+			messages.push(makeUserMsg([`tu_read`]));
+		}
+		pipeline.process(makeInput(messages, 1));
+
+		const evalEvent = sink.events.find(
+			(e) => e.type === "pipeline_stage" && e.stage === "evaluate",
+		);
+		expect(evalEvent).toBeDefined();
+		expect(typeof evalEvent?.operationCount).toBe("number");
+		expect(Array.isArray(evalEvent?.operations)).toBe(true);
+		const ops = evalEvent?.operations as Array<{ id: number; score: number }>;
+		expect(ops.length).toBeLessThanOrEqual(10);
+		// Ops should be sorted by score descending
+		for (let i = 1; i < ops.length; i++) {
+			expect(ops[i - 1]?.score).toBeGreaterThanOrEqual(ops[i]?.score ?? 0);
+		}
+	});
+
+	it("compact event carries compactedCount", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const compactEvent = sink.events.find(
+			(e) => e.type === "pipeline_stage" && e.stage === "compact",
+		);
+		expect(compactEvent).toBeDefined();
+		expect(typeof compactEvent?.compactedCount).toBe("number");
+	});
+
+	it("budget event carries utilization and archivedCount", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const budgetEvent = sink.events.find(
+			(e) => e.type === "pipeline_stage" && e.stage === "budget",
+		);
+		expect(budgetEvent).toBeDefined();
+		expect(typeof budgetEvent?.utilization).toBe("number");
+		expect(budgetEvent?.utilization).toBeGreaterThanOrEqual(0);
+		expect(budgetEvent?.utilization).toBeLessThanOrEqual(1);
+		expect(typeof budgetEvent?.archivedCount).toBe("number");
+	});
+
+	it("render event carries messageCount and archiveEntryCount", () => {
+		const sink = makeSink();
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+			eventEmitter: sink,
+		});
+
+		const a = makeAssistantMsg([{ name: "read" }]);
+		const u = makeUserMsg(["tu_read"]);
+		pipeline.process(makeInput([TASK, a, u], 1));
+
+		const renderEvent = sink.events.find(
+			(e) => e.type === "pipeline_stage" && e.stage === "render",
+		);
+		expect(renderEvent).toBeDefined();
+		expect(typeof renderEvent?.messageCount).toBe("number");
+		expect(renderEvent?.messageCount).toBeGreaterThan(0);
+		expect(typeof renderEvent?.archiveEntryCount).toBe("number");
+	});
+
+	it("does not throw when verbose=true but no eventEmitter is provided", () => {
+		const pipeline = new SaplingPipelineV1({
+			windowSize: 200_000,
+			verbose: true,
+		});
+
+		const a = makeAssistantMsg([{ name: "read" }]);
+		const u = makeUserMsg(["tu_read"]);
+		expect(() => pipeline.process(makeInput([TASK, a, u], 1))).not.toThrow();
 	});
 });
