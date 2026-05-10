@@ -26,6 +26,12 @@ import type {
 	StageContext,
 } from "./types.ts";
 
+/**
+ * Cap on commitments surfaced through getRpcState() so the RPC payload stays
+ * bounded even after long sessions. Mirrors MAX_RPC_COMMITMENTS in src/rpc/types.ts.
+ */
+const RPC_COMMITMENT_CAP = 50;
+
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
@@ -139,19 +145,34 @@ export class SaplingPipelineV1 {
 
 	/**
 	 * Return a compact pipeline state for RPC getState responses.
+	 *
+	 * Shape mirrors PipelineRpcState in src/rpc/types.ts (kept structural to
+	 * preserve the src/context → src/rpc independence noted in pipeline.ts:50).
 	 */
 	getRpcState(): {
 		activeOperationId: number | null;
 		operationCount: number;
 		contextUtilization: number;
 		archiveEntryCount: number;
+		commitments: Array<{
+			id: string;
+			turn: number;
+			text: string;
+			status: "pending" | "resolved";
+		}>;
 	} | null {
 		if (!this.lastState) return null;
+		// Most-recent first, then by id for a stable tiebreaker. Cap at 50.
+		const commitments = [...this.commitmentRegistry]
+			.sort((a, b) => b.turn - a.turn || a.id.localeCompare(b.id))
+			.slice(0, RPC_COMMITMENT_CAP)
+			.map((r) => ({ id: r.id, turn: r.turn, text: r.text, status: r.status }));
 		return {
 			activeOperationId: this.lastState.activeOperationId,
 			operationCount: this.lastState.operations.length,
 			contextUtilization: this.lastState.utilization,
 			archiveEntryCount: this.lastState.operationCounts.archived,
+			commitments,
 		};
 	}
 
