@@ -5,6 +5,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Message } from "../../types.ts";
 import { extractTurnHint, SaplingPipelineV1 } from "./pipeline.ts";
+import { StageRegistry } from "./registry.ts";
+import type { PipelineStage, StageContext } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -183,6 +185,70 @@ describe("SaplingPipelineV1", () => {
 			expect(typeof rpcState?.operationCount).toBe("number");
 			expect(typeof rpcState?.contextUtilization).toBe("number");
 			expect(typeof rpcState?.archiveEntryCount).toBe("number");
+			expect(Array.isArray(rpcState?.commitments)).toBe(true);
+		});
+
+		it("getRpcState() surfaces tracked commitments with id/turn/text/status", () => {
+			const pipeline = makePipeline();
+			const assistant: Message = {
+				role: "assistant",
+				content: [
+					{
+						type: "text",
+						text: "Plan:\n1. Edit src/foo.ts\n2. Update src/bar.ts",
+					},
+					{
+						type: "tool_use",
+						id: "tu_read",
+						name: "read",
+						input: { path: "src/foo.ts" },
+					},
+				],
+			};
+			const toolResults = makeUserMsg([{ id: "tu_read" }]);
+
+			pipeline.process(makeInput([TASK_MSG, assistant, toolResults]));
+
+			const rpcState = pipeline.getRpcState();
+			expect(rpcState?.commitments.length).toBeGreaterThanOrEqual(2);
+			for (const c of rpcState?.commitments ?? []) {
+				expect(c.id).toMatch(/^c-1-\d+$/);
+				expect(c.turn).toBe(1);
+				expect(typeof c.text).toBe("string");
+				expect(["pending", "resolved"]).toContain(c.status);
+			}
+		});
+
+		it("getRpcState() caps commitments at 50 entries, most-recent first", () => {
+			const pipeline = makePipeline();
+			// Run one pipeline cycle so lastState is populated, then inject a large
+			// synthetic registry to exercise the sort+cap logic in isolation.
+			const assistant = makeAssistantMsg([{ name: "read" }]);
+			const toolResults = makeUserMsg([{ id: "tu_read" }]);
+			pipeline.process(makeInput([TASK_MSG, assistant, toolResults]));
+
+			const internal = pipeline as unknown as {
+				commitmentRegistry: Array<{
+					id: string;
+					text: string;
+					turn: number;
+					operationId: number;
+					status: "pending" | "resolved";
+				}>;
+			};
+			internal.commitmentRegistry = Array.from({ length: 75 }, (_, i) => ({
+				id: `c-${i + 1}-1`,
+				text: `task ${i + 1}`,
+				turn: i + 1,
+				operationId: 1,
+				status: i % 2 === 0 ? "pending" : "resolved",
+			}));
+
+			const rpcState = pipeline.getRpcState();
+			expect(rpcState?.commitments).toHaveLength(50);
+			// Most recent first: turn=75 leads, turn=26 closes the window.
+			expect(rpcState?.commitments[0]?.turn).toBe(75);
+			expect(rpcState?.commitments[49]?.turn).toBe(26);
 		});
 	});
 
@@ -289,6 +355,101 @@ describe("SaplingPipelineV1", () => {
 			const total = counts.active + counts.completed + counts.compacted + counts.archived;
 			expect(total).toBe(output.state.operations.length);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// StageContext plumbing — currentTurn + eventEmitter
+// ---------------------------------------------------------------------------
+
+describe("process — StageContext plumbing", () => {
+	/**
+	 * Builds a registry containing a single capture stage (plus the render stage
+	 * that produces ctx.output, otherwise pipeline.process() throws). The capture
+	 * stage records every StageContext it sees so assertions can inspect the
+	 * threaded fields without depending on real pipeline behavior.
+	 */
+	function makeCaptureRegistry(captures: StageContext[]): StageRegistry {
+		const capture: PipelineStage = {
+			name: "capture",
+			execute(ctx) {
+				captures.push(ctx);
+			},
+		};
+		const render: PipelineStage = {
+			name: "render",
+			execute(ctx) {
+				ctx.output = {
+					messages: ctx.input.messages,
+					systemPrompt: ctx.input.systemPrompt,
+					state: {
+						operations: [],
+						activeOperationId: null,
+						utilization: 0,
+						budget: {
+							windowSize: ctx.windowSize,
+							systemWithArchive: 0,
+							activeOperations: 0,
+							headroom: ctx.windowSize,
+							utilization: 0,
+						},
+						operationCounts: { active: 0, completed: 0, compacted: 0, archived: 0 },
+					},
+				};
+			},
+		};
+		return new StageRegistry([capture, render]);
+	}
+
+	it("threads currentTurn from input.turnHint.turn into ctx", () => {
+		const captures: StageContext[] = [];
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+		});
+
+		pipeline.process({
+			messages: [TASK_MSG],
+			systemPrompt: BASE_PROMPT,
+			turnHint: { turn: 7, tools: [], files: [], hasError: false },
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+		pipeline.process({
+			messages: [TASK_MSG],
+			systemPrompt: BASE_PROMPT,
+			turnHint: { turn: 12, tools: [], files: [], hasError: false },
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+
+		expect(captures).toHaveLength(2);
+		expect(captures[0]?.currentTurn).toBe(7);
+		expect(captures[1]?.currentTurn).toBe(12);
+	});
+
+	it("threads the eventEmitter from PipelineOptions into ctx", () => {
+		const captures: StageContext[] = [];
+		const sink = { emit: () => {} };
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+			eventEmitter: sink,
+		});
+
+		pipeline.process(makeInput([TASK_MSG]));
+
+		expect(captures[0]?.eventEmitter).toBe(sink);
+	});
+
+	it("leaves ctx.eventEmitter undefined when no sink is provided", () => {
+		const captures: StageContext[] = [];
+		const pipeline = new SaplingPipelineV1({
+			windowSize: DEFAULT_WINDOW,
+			registry: makeCaptureRegistry(captures),
+		});
+
+		pipeline.process(makeInput([TASK_MSG]));
+
+		expect(captures[0]?.eventEmitter).toBeUndefined();
 	});
 });
 

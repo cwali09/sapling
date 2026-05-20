@@ -100,10 +100,55 @@ export interface LoopOptions {
 	setState?: (state: { turn: number; phase: "calling_llm" | "executing_tools" | "idle" }) => void;
 	/** Context window size in tokens for the v1 pipeline. */
 	contextWindowSize?: number;
-	/** Abort signal for graceful shutdown (e.g. SIGTERM from ov stop). */
+	/** Abort signal for graceful shutdown (e.g. SIGTERM from an orchestrator). */
 	abortSignal?: AbortSignal;
-	/** Optional ecosystem integration config (overstory orchestration). */
+	/** Optional ecosystem integration config (orchestrator labels + metrics path). */
 	ecosystemConfig?: EcosystemConfig;
+	/** Optional pipeline tuning overrides. */
+	pipelineTuning?: PipelineTuning;
+	/** When true, the v1 pipeline emits per-stage verbose diagnostics (stderr + pipeline_stage events). */
+	verbose?: boolean;
+}
+
+// ─── Pipeline Tuning ─────────────────────────────────────────────────────────
+
+/**
+ * Optional overrides for pipeline tuning constants.
+ * All fields are optional — unset fields use compile-time defaults from context/v1/types.ts.
+ */
+export interface PipelineTuning {
+	evalWeights?: {
+		recency?: number;
+		fileOverlap?: number;
+		causalDependency?: number;
+		outcomeSignificance?: number;
+		operationType?: number;
+	};
+	recencyHalfLifeOps?: number;
+	boundaryWeights?: {
+		toolTypeTransition?: number;
+		fileScopeChange?: number;
+		intentSignal?: number;
+		temporalGap?: number;
+	};
+	boundaryThreshold?: number;
+	budgetAllocations?: {
+		systemWithArchive?: number;
+		activeOperations?: number;
+		headroom?: number;
+	};
+	compactionScoreThreshold?: number;
+	toolOutputTruncation?: {
+		bashMaxTokens?: number;
+		bashKeepFirstLines?: number;
+		bashKeepLastLines?: number;
+		failureBashMaxTokens?: number;
+		grepMaxTokens?: number;
+		readMaxTokens?: number;
+		readKeepFirstLines?: number;
+		readKeepLastLines?: number;
+		globMaxResults?: number;
+	};
 }
 
 export interface LoopResult {
@@ -149,6 +194,7 @@ export interface SaplingConfig {
 	apiBaseUrl?: string;
 	apiKey?: string;
 	guardsFile?: string;
+	pipelineTuning?: PipelineTuning;
 }
 
 export interface RunOptions {
@@ -163,6 +209,12 @@ export interface RunOptions {
 	rpcMode?: boolean;
 	rpcSocket?: string;
 	dryRun?: boolean;
+	/** Ecosystem config: agent name for orchestrator labeling */
+	agentName?: string;
+	/** Ecosystem config: task ID for orchestrator labeling */
+	taskId?: string;
+	/** Ecosystem config: path to write metrics JSON */
+	metricsPath?: string;
 }
 
 // ─── Context Types ────────────────────────────────────────────────────────────
@@ -216,9 +268,9 @@ export interface ToolRegistry {
 // ─── Ecosystem Types ────────────────────────────────────────────────────────────
 
 /**
- * Configuration for ecosystem integration (overstory orchestration).
- * When present, enables between-turn mail checks,
- * per-turn metrics writes, and task status updates on loop exit.
+ * Configuration for ecosystem integration with an external orchestrator.
+ * When present, enables per-turn metrics writes and a final _exit metrics
+ * record on loop termination — consumed by the orchestrator via the metrics file.
  */
 export interface EcosystemConfig {
 	agentName: string;
@@ -230,7 +282,7 @@ export interface EcosystemConfig {
 // ─── Guards Types ─────────────────────────────────────────────────────────────
 
 /**
- * Lifecycle hook configuration for orchestrators (e.g. overstory).
+ * Lifecycle hook configuration for orchestrators.
  * Each field is an argv array to spawn as a subprocess at the corresponding event.
  */
 export interface EventConfig {

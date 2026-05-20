@@ -45,10 +45,11 @@ describe("EventEmitter", () => {
 			emitter.turnStart(1);
 			emitter.toolStart(1, "bash", "t1", "{}");
 			emitter.toolEnd(1, "bash", "t1", true, 42);
-			emitter.turnEnd(1, 100, 50, 0, 0, "claude", 0.5);
+			emitter.turnEnd(1, 100, 50, 0, 0, "claude", 0.5, null, null);
 			emitter.progress(50, "Running tests", 3);
 			emitter.result("success", "done", 1, 100, 50);
 			emitter.error("boom", "TRANSIENT");
+			emitter.compact(1, 2, "score_below_threshold", "compacted", 0.1);
 			expect(writeSpy).not.toHaveBeenCalled();
 		});
 
@@ -196,7 +197,7 @@ describe("EventEmitter", () => {
 
 		it("turnEnd() emits correct shape with all token fields and model", () => {
 			const emitter = new EventEmitter(true);
-			emitter.turnEnd(2, 500, 100, 20, 10, "claude-sonnet-4-6", 0.45);
+			emitter.turnEnd(2, 500, 100, 20, 10, "claude-sonnet-4-6", 0.45, 3, 0.78);
 			const parsed = parseFirstEvent(writeSpy);
 			expect(parsed.type).toBe("turn_end");
 			expect(parsed.turn).toBe(2);
@@ -206,6 +207,18 @@ describe("EventEmitter", () => {
 			expect(parsed.cacheWriteTokens).toBe(10);
 			expect(parsed.model).toBe("claude-sonnet-4-6");
 			expect(parsed.contextUtilization).toBe(0.45);
+			expect(parsed.activeOperationId).toBe(3);
+			expect(parsed.activeOperationScore).toBe(0.78);
+			expect(parsed.score).toBe(0.78);
+		});
+
+		it("turnEnd() emits null active-op fields when no operation is active", () => {
+			const emitter = new EventEmitter(true);
+			emitter.turnEnd(1, 0, 0, 0, 0, "model-x", 0, null, null);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.activeOperationId).toBeNull();
+			expect(parsed.activeOperationScore).toBeNull();
+			expect(parsed.score).toBeNull();
 		});
 
 		it("result() emits correct shape for success outcome", () => {
@@ -278,6 +291,63 @@ describe("EventEmitter", () => {
 			emitter.turnStart(1);
 			emitter.turnStart(2);
 			expect(writeSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it("compact() emits correct shape for score-driven compaction", () => {
+			const emitter = new EventEmitter(true);
+			emitter.compact(4, 7, "score_below_threshold", "compacted", 0.18);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("compact");
+			expect(parsed.turn).toBe(4);
+			expect(parsed.operationId).toBe(7);
+			expect(parsed.reason).toBe("score_below_threshold");
+			expect(parsed.archivedAs).toBe("compacted");
+			expect(parsed.score).toBe(0.18);
+		});
+
+		it("compact() emits correct shape for budget-driven archival", () => {
+			const emitter = new EventEmitter(true);
+			emitter.compact(12, 3, "budget_pressure", "archived", 0.42);
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("compact");
+			expect(parsed.turn).toBe(12);
+			expect(parsed.operationId).toBe(3);
+			expect(parsed.reason).toBe("budget_pressure");
+			expect(parsed.archivedAs).toBe("archived");
+			expect(parsed.score).toBe(0.42);
+		});
+
+		it("pipelineStage() emits correct shape with stage-specific metadata spread", () => {
+			const emitter = new EventEmitter(true);
+			emitter.pipelineStage(7, "evaluate", { operationCount: 3, topK: 10 });
+			const parsed = parseFirstEvent(writeSpy);
+			expect(parsed.type).toBe("pipeline_stage");
+			expect(parsed.turn).toBe(7);
+			expect(parsed.stage).toBe("evaluate");
+			expect(parsed.operationCount).toBe(3);
+			expect(parsed.topK).toBe(10);
+		});
+
+		it("pipelineStage() supports each canonical stage name", () => {
+			const emitter = new EventEmitter(true);
+			const stages = ["ingest", "evaluate", "compact", "budget", "render"] as const;
+			for (const stage of stages) {
+				emitter.pipelineStage(1, stage, {});
+			}
+			expect(writeSpy).toHaveBeenCalledTimes(stages.length);
+			for (let i = 0; i < stages.length; i++) {
+				const written = (writeSpy.mock.calls[i] as [string])[0];
+				const parsed = JSON.parse(written.trim()) as Record<string, unknown>;
+				expect(parsed.stage).toBe(stages[i] as string);
+			}
+		});
+	});
+
+	describe("when disabled — pipelineStage", () => {
+		it("pipelineStage() is a no-op when disabled", () => {
+			const emitter = new EventEmitter(false);
+			emitter.pipelineStage(1, "ingest", { operationCount: 0 });
+			expect(writeSpy).not.toHaveBeenCalled();
 		});
 	});
 });

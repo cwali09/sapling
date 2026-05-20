@@ -4,15 +4,22 @@
 
 import { describe, expect, it } from "bun:test";
 import { renderArchiveEntry, renderCompactSummary } from "./templates.ts";
-import type { Operation } from "./types.ts";
+import type { Commitment, Operation } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
 
+function asCommitments(texts: string[]): Commitment[] {
+	return texts.map((text, i) => ({ id: `c-1-${i + 1}`, text }));
+}
+
 function makeOp(
-	overrides: Partial<Operation & { pendingCommitments?: string[] }> = {},
-): Operation & { pendingCommitments?: string[] } {
+	overrides: Partial<Omit<Operation, "pendingCommitments">> & {
+		pendingCommitments?: string[];
+	} = {},
+): Operation {
+	const { pendingCommitments, ...rest } = overrides;
 	return {
 		id: 1,
 		status: "completed",
@@ -27,7 +34,10 @@ function makeOp(
 		summary: null,
 		startTurn: 0,
 		endTurn: 0,
-		...overrides,
+		...rest,
+		...(pendingCommitments !== undefined
+			? { pendingCommitments: asCommitments(pendingCommitments) }
+			: {}),
 	};
 }
 

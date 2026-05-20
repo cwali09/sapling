@@ -253,6 +253,33 @@ describe("RpcServer.getState", () => {
 		expect(server.dequeue()).toBeUndefined();
 	});
 
+	it("includes pipeline.commitments from setPipelineState in getState response", async () => {
+		const { emitter } = makeCaptureEmitter();
+		const { writer, lines } = makeCapturingWriter();
+		const stream = makeStream([JSON.stringify({ id: 7, method: "getState" })]);
+		const server = new RpcServer(stream, emitter, writer);
+		server.setPipelineState({
+			activeOperationId: 2,
+			operationCount: 4,
+			contextUtilization: 0.42,
+			archiveEntryCount: 1,
+			commitments: [
+				{ id: "c-3-1", turn: 3, text: "edit src/foo.ts", status: "pending" },
+				{ id: "c-2-1", turn: 2, text: "add test for bar", status: "resolved" },
+			],
+		});
+		await server.drained;
+
+		const resp = JSON.parse(lines[0] as string) as Record<string, unknown>;
+		const result = resp.result as Record<string, unknown>;
+		const pipeline = result.pipeline as Record<string, unknown>;
+		expect(pipeline.activeOperationId).toBe(2);
+		expect(pipeline.commitments).toEqual([
+			{ id: "c-3-1", turn: 3, text: "edit src/foo.ts", status: "pending" },
+			{ id: "c-2-1", turn: 2, text: "add test for bar", status: "resolved" },
+		]);
+	});
+
 	it("handles multiple getState requests with different states", async () => {
 		const { emitter } = makeCaptureEmitter();
 		const lines: string[] = [];

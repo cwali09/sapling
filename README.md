@@ -52,6 +52,9 @@ sapling run <prompt>            Execute a task
   --dry-run                        Show what tools would do without executing
   --prompt-file <path>             Read prompt from file
   --rpc-socket <path>              Unix socket path for external getState queries
+  --agent-name <name>              Orchestrator label surfaced on events + metrics
+  --task-id <id>                   Orchestrator task identifier surfaced on events + metrics
+  --metrics-path <path>            Per-turn token usage written to disk; final _exit block on shutdown
   --quiet, -q                     Suppress non-essential output
 
 sapling auth set <provider>     Store API key for a provider (anthropic, minimax)
@@ -107,6 +110,7 @@ sapling/
     json.ts               JSON parsing utilities
     test-helpers.ts       Shared test utilities (temp dirs, mock factories)
     integration.test.ts   End-to-end tests (real API, gated behind SAPLING_INTEGRATION_TESTS=1)
+    orchestrator-surface.test.ts  E2E tests for orchestrator integration surface (NDJSON events, RPC, metrics, guards, shutdown)
     commands/
       auth.ts             API key management (set, show, remove providers)
       config.ts           Project/home YAML config management (get, set, list, init)
@@ -180,6 +184,9 @@ Sapling is part of the [os-eco](https://github.com/jayminwest/os-eco) AI agent t
 | `SAPLING_CONTEXT_WINDOW` | `200000` | Context window size in tokens |
 | `ANTHROPIC_BASE_URL` | — | Custom API base URL for compatible providers |
 | `ANTHROPIC_AUTH_TOKEN` | — | Fallback for `ANTHROPIC_API_KEY` |
+| `SAPLING_AGENT_NAME` | — | Orchestrator label surfaced on events + metrics |
+| `SAPLING_TASK_ID` | — | Orchestrator task identifier surfaced on events + metrics |
+| `SAPLING_METRICS_PATH` | — | Path for per-turn metrics JSON + final `_exit` block |
 
 ## Development
 
@@ -187,7 +194,7 @@ Sapling is part of the [os-eco](https://github.com/jayminwest/os-eco) AI agent t
 git clone https://github.com/jayminwest/sapling.git
 cd sapling
 bun install
-bun test                  # 792 tests across 39 files (2451 expect() calls)
+bun test                  # 859 tests across 40 files (3076 expect() calls)
 bun run lint              # Biome linting
 bun run typecheck         # TypeScript strict check
 ```

@@ -94,6 +94,11 @@ function makeTurn(
 		tools.map((t, i) => ({ name: t, path: files[i] ?? undefined })),
 	);
 	const userMsg = makeUserMsg(tools.map((t) => ({ id: `tu_${t}`, isError: opts.hasError })));
+	const turnNumber = index + 1;
+	const commitments = (opts.commitments ?? []).map((text, i) => ({
+		id: `c-${turnNumber}-${i + 1}`,
+		text,
+	}));
 	return {
 		index,
 		assistant,
@@ -105,7 +110,7 @@ function makeTurn(
 			hasDecision: opts.hasDecision ?? false,
 			tokens: 100,
 			timestamp: opts.timestamp ?? Date.now(),
-			commitments: opts.commitments ?? [],
+			commitments,
 		},
 	};
 }
@@ -1018,49 +1023,63 @@ describe("hasToolTransition — metadata-based phase lookup", () => {
 describe("extractCommitments", () => {
 	it("extracts commitments from numbered lists with action verbs", () => {
 		const text = "I'll do the following:\n1. Edit src/foo.ts\n2. Edit src/bar.ts\n3. Run tests";
-		const commitments = extractCommitments(text);
-		expect(commitments.some((c) => c.includes("src/foo.ts"))).toBe(true);
-		expect(commitments.some((c) => c.includes("src/bar.ts"))).toBe(true);
-		expect(commitments.some((c) => /run tests/i.test(c))).toBe(true);
+		const commitments = extractCommitments(text, 1);
+		expect(commitments.some((c) => c.text.includes("src/foo.ts"))).toBe(true);
+		expect(commitments.some((c) => c.text.includes("src/bar.ts"))).toBe(true);
+		expect(commitments.some((c) => /run tests/i.test(c.text))).toBe(true);
 	});
 
 	it("extracts commitments from future-tense phrases", () => {
 		const text = "I'll implement the authentication module and then run the test suite.";
-		const commitments = extractCommitments(text);
+		const commitments = extractCommitments(text, 1);
 		expect(commitments.length).toBeGreaterThan(0);
-		expect(commitments.some((c) => /implement/i.test(c))).toBe(true);
+		expect(commitments.some((c) => /implement/i.test(c.text))).toBe(true);
 	});
 
 	it("extracts commitments from bulleted action lists", () => {
 		const text = "Steps:\n- Edit config.ts\n- Update schema.json";
-		const commitments = extractCommitments(text);
-		expect(commitments.some((c) => c.includes("config.ts"))).toBe(true);
-		expect(commitments.some((c) => c.includes("schema.json"))).toBe(true);
+		const commitments = extractCommitments(text, 1);
+		expect(commitments.some((c) => c.text.includes("config.ts"))).toBe(true);
+		expect(commitments.some((c) => c.text.includes("schema.json"))).toBe(true);
 	});
 
 	it("ignores list items without action verbs or file paths", () => {
 		const text = "1. Something vague\n2. A general concept";
-		const commitments = extractCommitments(text);
+		const commitments = extractCommitments(text, 1);
 		expect(commitments).toHaveLength(0);
 	});
 
 	it("returns empty array for plain descriptive text", () => {
 		const text = "The system uses a layered architecture with separate concerns.";
-		const commitments = extractCommitments(text);
+		const commitments = extractCommitments(text, 1);
 		expect(commitments).toHaveLength(0);
 	});
 
 	it("deduplicates repeated commitments", () => {
 		const text = "I'll edit src/foo.ts\n1. Edit src/foo.ts";
-		const commitments = extractCommitments(text);
-		const dedupedCount = new Set(commitments).size;
-		expect(dedupedCount).toBe(commitments.length);
+		const commitments = extractCommitments(text, 1);
+		const texts = commitments.map((c) => c.text);
+		expect(new Set(texts).size).toBe(commitments.length);
 	});
 
 	it("caps output at 20 items", () => {
 		const items = Array.from({ length: 30 }, (_, i) => `${i + 1}. Edit src/file${i}.ts`).join("\n");
-		const commitments = extractCommitments(items);
+		const commitments = extractCommitments(items, 1);
 		expect(commitments.length).toBeLessThanOrEqual(20);
+	});
+
+	it("assigns deterministic c-<turn>-<n> ids based on the turn number", () => {
+		const text = "I'll do the following:\n1. Edit src/foo.ts\n2. Edit src/bar.ts";
+		const turn7 = extractCommitments(text, 7);
+		expect(turn7.length).toBeGreaterThanOrEqual(2);
+		expect(turn7[0]?.id).toBe("c-7-1");
+		expect(turn7[1]?.id).toBe("c-7-2");
+		// Same input + turn → same IDs
+		const turn7Again = extractCommitments(text, 7);
+		expect(turn7Again.map((c) => c.id)).toEqual(turn7.map((c) => c.id));
+		// Different turn → different IDs
+		const turn9 = extractCommitments(text, 9);
+		expect(turn9[0]?.id).toBe("c-9-1");
 	});
 });
 
@@ -1092,9 +1111,9 @@ describe("computePendingCommitments", () => {
 		});
 		const pending = computePendingCommitments(op);
 		// src/bar.ts was committed but not in artifacts → pending
-		expect(pending.some((c) => c.includes("src/bar.ts"))).toBe(true);
+		expect(pending.some((c) => c.text.includes("src/bar.ts"))).toBe(true);
 		// src/foo.ts was committed and IS in artifacts → not pending
-		expect(pending.some((c) => c === "edit src/foo.ts")).toBe(false);
+		expect(pending.some((c) => c.text === "edit src/foo.ts")).toBe(false);
 	});
 
 	it("includes non-file commitments from last turn", () => {
@@ -1107,7 +1126,7 @@ describe("computePendingCommitments", () => {
 			outcome: "partial",
 		});
 		const pending = computePendingCommitments(op);
-		expect(pending).toContain("run the test suite");
+		expect(pending.some((c) => c.text === "run the test suite")).toBe(true);
 	});
 
 	it("does not include non-file commitments from non-last turns", () => {
@@ -1124,7 +1143,7 @@ describe("computePendingCommitments", () => {
 		});
 		const pending = computePendingCommitments(op);
 		// "check the documentation" is non-file and from a non-last turn → not included
-		expect(pending).not.toContain("check the documentation");
+		expect(pending.some((c) => c.text === "check the documentation")).toBe(false);
 	});
 
 	it("returns empty array when no commitments in any turn", () => {

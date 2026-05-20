@@ -118,6 +118,37 @@ describe("RpcSocketServer", () => {
 		await socketSrv.stop();
 	});
 
+	it("surfaces pipeline.commitments via getState over the socket", async () => {
+		const rpcServer = makeRpcServer();
+		const socketSrv = new RpcSocketServer(rpcServer);
+		await socketSrv.start(socketPath);
+
+		rpcServer.setPipelineState({
+			activeOperationId: 1,
+			operationCount: 2,
+			contextUtilization: 0.1,
+			archiveEntryCount: 0,
+			commitments: [
+				{ id: "c-1-1", turn: 1, text: "wire RPC", status: "pending" },
+				{ id: "c-1-2", turn: 1, text: "add tests", status: "resolved" },
+			],
+		});
+
+		const resp = (await socketRoundtrip(socketPath, {
+			jsonrpc: "2.0",
+			id: 9,
+			method: "getState",
+		})) as Record<string, unknown>;
+		const result = resp.result as Record<string, unknown>;
+		const pipeline = result.pipeline as Record<string, unknown>;
+		expect(pipeline.commitments).toEqual([
+			{ id: "c-1-1", turn: 1, text: "wire RPC", status: "pending" },
+			{ id: "c-1-2", turn: 1, text: "add tests", status: "resolved" },
+		]);
+
+		await socketSrv.stop();
+	});
+
 	it("returns method-not-found for unknown methods", async () => {
 		await server.start(socketPath);
 		const resp = (await socketRoundtrip(socketPath, {

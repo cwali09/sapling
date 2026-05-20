@@ -310,7 +310,7 @@ describe("guards.json end-to-end enforcement", () => {
 	});
 
 	// ── 10. fileScope blocks writes to files outside assigned scope ──────────
-	// Overstory assigns specific files to builder agents via fileScope.
+	// Orchestrators assign specific files to builder agents via fileScope.
 
 	it("blocks write to file outside fileScope", async () => {
 		const allowedFile = join(testDir, "src", "allowed.ts");

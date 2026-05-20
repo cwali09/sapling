@@ -604,3 +604,119 @@ describe("truncateOperationOutputs — token count update", () => {
 		expect(turn.meta.tokens).toBeLessThan(50);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// compact — event emission (PipelineEventSink)
+// ---------------------------------------------------------------------------
+
+describe("compact — event emission", () => {
+	function makeSink(): {
+		events: Array<Record<string, unknown>>;
+		emit: (e: Record<string, unknown>) => void;
+	} {
+		const events: Array<Record<string, unknown>> = [];
+		return {
+			events,
+			emit(e) {
+				events.push(e);
+			},
+		};
+	}
+
+	it("emits a `compact` event when an op is compacted by score", () => {
+		const sink = makeSink();
+		const op = makeOp({
+			id: 7,
+			status: "completed",
+			score: COMPACTION_SCORE_THRESHOLD - 0.05,
+			turns: [makeTurn(0, [{ name: "read", path: "src/foo.ts" }])],
+		});
+
+		compact([op], null, undefined, sink, 4);
+
+		expect(op.status).toBe("compacted");
+		expect(sink.events).toHaveLength(1);
+		expect(sink.events[0]).toMatchObject({
+			type: "compact",
+			turn: 4,
+			operationId: 7,
+			reason: "score_below_threshold",
+			archivedAs: "compacted",
+		});
+		expect(typeof sink.events[0]?.score).toBe("number");
+		expect(sink.events[0]?.score).toBeLessThan(COMPACTION_SCORE_THRESHOLD);
+	});
+
+	it("does not emit when an op is kept (score above threshold)", () => {
+		const sink = makeSink();
+		const op = makeOp({
+			id: 1,
+			status: "completed",
+			score: COMPACTION_SCORE_THRESHOLD + 0.1,
+			turns: [makeTurn(0, [{ name: "read" }])],
+		});
+
+		compact([op], null, undefined, sink, 1);
+
+		expect(op.status).toBe("completed");
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("does not emit for the active operation (never compacted)", () => {
+		const sink = makeSink();
+		const active = makeOp({ id: 1, status: "active", score: 0 });
+
+		compact([active], 1, undefined, sink, 2);
+
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("does not emit for already-compacted or archived ops", () => {
+		const sink = makeSink();
+		const compacted = makeOp({ id: 1, status: "compacted", score: 0, summary: "old" });
+		const archived = makeOp({ id: 2, status: "archived", score: 0 });
+
+		compact([compacted, archived], null, undefined, sink, 3);
+
+		expect(sink.events).toHaveLength(0);
+	});
+
+	it("emits one event per compacted op when multiple drop below threshold", () => {
+		const sink = makeSink();
+		const lowA = makeOp({ id: 10, status: "completed", score: 0.05 });
+		const lowB = makeOp({ id: 11, status: "completed", score: 0.1 });
+		const high = makeOp({ id: 12, status: "completed", score: 0.9 });
+
+		compact([lowA, lowB, high], null, undefined, sink, 5);
+
+		expect(sink.events).toHaveLength(2);
+		const ids = sink.events.map((e) => e.operationId).sort();
+		expect(ids).toEqual([10, 11]);
+		for (const event of sink.events) {
+			expect(event.reason).toBe("score_below_threshold");
+			expect(event.archivedAs).toBe("compacted");
+			expect(event.turn).toBe(5);
+		}
+	});
+
+	it("is a no-op when no eventSink is provided", () => {
+		const op = makeOp({
+			id: 1,
+			status: "completed",
+			score: 0.05,
+			turns: [makeTurn(0, [{ name: "read" }])],
+		});
+		// Should not throw and should still compact normally
+		compact([op], null);
+		expect(op.status).toBe("compacted");
+	});
+
+	it("does not emit when sink is provided but currentTurn is undefined", () => {
+		const sink = makeSink();
+		const op = makeOp({ id: 1, status: "completed", score: 0.05 });
+		compact([op], null, undefined, sink); // no currentTurn
+
+		expect(op.status).toBe("compacted");
+		expect(sink.events).toHaveLength(0);
+	});
+});

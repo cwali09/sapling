@@ -16,7 +16,7 @@ import { configure, logger } from "./logging/logger.ts";
 import { appendSessionRecord, summarizePrompt } from "./session.ts";
 import type { LlmBackend, RunOptions } from "./types.ts";
 
-export const VERSION = "0.3.1";
+export const VERSION = "0.3.2";
 
 const startTime = Date.now();
 
@@ -63,6 +63,9 @@ program
 	.option("--guards-file <path>", "Path to guards config JSON file")
 	.option("--mode <mode>", "Execution mode: one-shot (default) or rpc")
 	.option("--dry-run", "Show what tools would do without executing")
+	.option("--agent-name <name>", "Agent name for ecosystem config")
+	.option("--task-id <id>", "Task identifier for ecosystem config")
+	.option("--metrics-path <path>", "Metrics output path for ecosystem config")
 	.action(
 		async (prompt: string | undefined, options: Record<string, string | boolean | undefined>) => {
 			try {
@@ -108,6 +111,9 @@ program
 					guardsFile: options.guardsFile as string | undefined,
 					rpcMode: isRpcMode,
 					dryRun: options.dryRun === true,
+					agentName: options.agentName as string | undefined,
+					taskId: options.taskId as string | undefined,
+					metricsPath: options.metricsPath as string | undefined,
 				};
 
 				const config = await loadConfig({

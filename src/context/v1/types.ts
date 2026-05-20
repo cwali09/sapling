@@ -5,12 +5,13 @@
  * See docs/context-pipeline-v1.md for design details.
  */
 
-import type { Message, TokenUsage } from "../../types.ts";
+import type { Message, PipelineTuning, TokenUsage } from "../../types.ts";
 
 export type {
 	BudgetEntry,
 	ContentBlock,
 	Message,
+	PipelineTuning,
 	TokenUsage,
 	ToolPipelineMetadata,
 	ToolResultBlock,
@@ -32,6 +33,21 @@ export interface Turn {
 	meta: TurnMetadata;
 }
 
+/**
+ * A future-action promise extracted from assistant text. Stable, addressable identity
+ * lets `commitment_added` / `commitment_resolved` events and `getState` queries refer
+ * to a specific commitment across turns.
+ *
+ * `id` format: `c-<turn>-<n>` where `<turn>` is the 1-based turn number that produced
+ * the commitment and `<n>` is its 1-based position within that turn's extracted list.
+ * The format is deterministic — re-running the extractor on the same text yields the
+ * same IDs.
+ */
+export interface Commitment {
+	id: string;
+	text: string;
+}
+
 export interface TurnMetadata {
 	/** Tool names invoked in this turn. */
 	tools: string[];
@@ -46,7 +62,7 @@ export interface TurnMetadata {
 	/** Monotonic timestamp (Date.now()) when the turn was ingested. */
 	timestamp: number;
 	/** Future-action promises extracted from the assistant's text (e.g., "I will edit foo.ts"). */
-	commitments?: string[];
+	commitments?: Commitment[];
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +102,7 @@ export interface Operation {
 	/** Compact summary (generated when status moves to "compacted"). */
 	summary: string | null;
 	/** Commitments made during this operation that were not fulfilled (computed at finalization). */
-	pendingCommitments?: string[];
+	pendingCommitments?: Commitment[];
 	/** Turn index of the first turn in this operation. */
 	startTurn: number;
 	/** Turn index of the last turn in this operation (updated as turns are added). */
@@ -130,6 +146,42 @@ export interface PipelineState {
 	budget: BudgetUtilization;
 	/** Number of operations in each status. */
 	operationCounts: Record<OperationStatus, number>;
+}
+
+/**
+ * Resolution metadata for a `commitment_resolved` event.
+ *
+ * A commitment is resolved when a later operation (different from the one that
+ * introduced the commitment) produces all the files mentioned in the commitment
+ * text as artifacts. `resolvedBy` records which op + turn covered the files so
+ * consumers can spot-check false positives.
+ */
+export interface CommitmentResolution {
+	/** Operation ID that produced the artifacts covering the commitment. */
+	operationId: number;
+	/** 1-based turn number when the resolution was detected. */
+	turn: number;
+	/** Files mentioned in the commitment that were covered (subset of op.artifacts). */
+	files: string[];
+}
+
+/**
+ * Pipeline-instance state for a single tracked commitment. Mutated in place by the
+ * commitment-track stage as it observes new commitments and detects resolutions.
+ */
+export interface CommitmentRecord {
+	/** Stable identity (matches `Commitment.id`). */
+	id: string;
+	/** Verbatim commitment text. */
+	text: string;
+	/** 1-based turn number that produced the commitment. */
+	turn: number;
+	/** ID of the operation that owned the producing turn. */
+	operationId: number;
+	/** Lifecycle status. */
+	status: "pending" | "resolved";
+	/** Populated when status transitions to "resolved". */
+	resolvedBy?: CommitmentResolution;
 }
 
 export interface PipelineOutput {
@@ -352,6 +404,16 @@ export const COMPACTION_SCORE_THRESHOLD = 0.3;
 // ---------------------------------------------------------------------------
 
 /**
+ * Structural sink for pipeline-emitted NDJSON events. Mirrors the shape of
+ * src/hooks/events.ts EventEmitter so v1 stages can emit decision events
+ * (compact, commitment_added, pipeline_stage, ...) without taking a hard
+ * dependency on src/hooks/. Keeps src/context/v1/ orchestrator-agnostic.
+ */
+export interface PipelineEventSink {
+	emit(event: Record<string, unknown>): void;
+}
+
+/**
  * Shared mutable context passed through every pipeline stage in a single
  * process() cycle. Stages read from and write to this object to communicate
  * intermediate results.
@@ -363,12 +425,32 @@ export interface StageContext {
 	windowSize: number;
 	/** Whether to emit verbose debug logs to stderr. */
 	verbose: boolean;
+	/**
+	 * 1-based turn number for this pipeline cycle. Set by SaplingPipelineV1.process()
+	 * from input.turnHint.turn so stages can tag emitted events with the originating turn.
+	 */
+	currentTurn: number;
+	/**
+	 * Optional event sink for pipeline decision events. When undefined, stages must
+	 * skip event emission (no-op). Always undefined under tests that construct a
+	 * StageContext by hand without explicitly opting in.
+	 */
+	eventEmitter?: PipelineEventSink;
+	/** Optional pipeline tuning overrides (from config cascade). */
+	tuning?: PipelineTuning;
 	/** Operation registry — mutated in place by ingest / compact / budget stages. */
 	operations: Operation[];
 	/** Currently active operation ID — updated by the ingest stage. */
 	activeOperationId: number | null;
 	/** Next operation ID counter — updated by the ingest stage. Defaults to 1 if not provided. */
 	nextOperationId?: number;
+	/**
+	 * Pipeline-instance commitment registry threaded through StageContext so the
+	 * commitment-track stage can mutate it (registering new commitments, marking
+	 * resolutions). SaplingPipelineV1 owns the array and syncs it back after run.
+	 * Empty when the pipeline has not seen any commitments yet.
+	 */
+	commitmentRegistry: CommitmentRecord[];
 	/** Budget result — set by the budget stage, consumed by the render stage. */
 	budgetUtil: BudgetUtilization | null;
 	/** Final pipeline output — set by the render stage. */

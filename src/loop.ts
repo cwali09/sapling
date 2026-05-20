@@ -7,7 +7,9 @@
  * LLM errors use exponential backoff (3 retries).
  */
 
+import { resolveProvider } from "./config.ts";
 import { extractTurnHint, SaplingPipelineV1 } from "./context/v1/pipeline.ts";
+import type { PipelineState } from "./context/v1/types.ts";
 import { ClientError } from "./errors.ts";
 import { logger } from "./logging/logger.ts";
 import type {
@@ -124,12 +126,31 @@ function extractFilesModified(
 	return undefined;
 }
 
+/**
+ * Resolve the active operation's id and current evaluator score from a pipeline state.
+ * Returns null/null when there is no state yet, no active operation, or the active
+ * operation cannot be located (which would only happen if state is internally inconsistent).
+ */
+function deriveActiveOpInfo(state: PipelineState | null): {
+	activeOperationId: number | null;
+	activeOperationScore: number | null;
+} {
+	if (!state || state.activeOperationId === null) {
+		return { activeOperationId: null, activeOperationScore: null };
+	}
+	const op = state.operations.find((o) => o.id === state.activeOperationId);
+	return {
+		activeOperationId: state.activeOperationId,
+		activeOperationScore: op ? op.score : null,
+	};
+}
+
 // ─── Lifecycle Hook Helpers ───────────────────────────────────────────────────
 
 /**
  * Await the onSessionEnd hook if configured.
- * Must be awaited (unlike tool events) — overstory uses this for critical
- * session bookkeeping: token metrics, state transition, and worker_done mail.
+ * Must be awaited (unlike tool events) — orchestrators rely on this for
+ * critical session bookkeeping (token metrics, state transitions, etc.).
  */
 async function fireSessionEnd(argv: string[] | undefined): Promise<void> {
 	if (!argv) return;
@@ -138,29 +159,6 @@ async function fireSessionEnd(argv: string[] | undefined): Promise<void> {
 }
 
 // ─── Ecosystem Integration Helpers ─────────────────────────────────────────────
-
-/**
- * Check for pending mail from overstory orchestrator.
- * Fires after each turn to pick up steer/followUp/interrupt requests.
- * @returns true if the agent should continue, false if interrupted
- */
-async function checkEcosystemMail(ecosystem: EcosystemConfig): Promise<boolean> {
-	try {
-		const proc = Bun.spawn(["ov", "mail", "check", "--agent", ecosystem.agentName], {
-			stdout: "pipe",
-			stderr: "ignore",
-		});
-		const _output = await new Response(proc.stdout).text();
-		await proc.exited;
-		// Exit code 0 means mail present (needs attention), 1 means no mail
-		// For now, we just check and don't act on it - the orchestrator sends RPC
-		// commands via the socket/stdin channel. This is a heartbeat signal.
-		return true;
-	} catch {
-		// If mail check fails, continue loop
-		return true;
-	}
-}
 
 /**
  * Write per-turn metrics to the ecosystem metrics file.
@@ -200,9 +198,12 @@ async function writeTurnMetrics(
 }
 
 /**
- * Handle ecosystem (overstory) exit: write final metrics and send task_done mail.
+ * Write the final metrics _exit block on loop termination.
+ *
+ * Orchestrators consume the result via the metrics file, the NDJSON `result`
+ * event on stdout, or the process exit code — sapling does not push.
  */
-async function handleEcosystemExit(
+async function writeFinalMetrics(
 	ecosystem: EcosystemConfig | undefined,
 	exitReason: string,
 	totalTurns: number,
@@ -216,7 +217,6 @@ async function handleEcosystemExit(
 	if (!ecosystem) return;
 
 	try {
-		// Write final metrics file
 		const metricsPath = ecosystem.metricsPath ?? ".sapling/metrics.json";
 		let existingMetrics: Record<string, unknown> = {};
 		try {
@@ -242,24 +242,6 @@ async function handleEcosystemExit(
 		};
 
 		await Bun.write(metricsPath, JSON.stringify(finalMetrics, null, 2));
-
-		// Send task_done mail to orchestrator (fire-and-forget)
-		Bun.spawn(
-			[
-				"ov",
-				"mail",
-				"send",
-				"--to",
-				"eco-integ-lead",
-				"--subject",
-				`task_done: ${ecosystem.taskId}`,
-				"--body",
-				`Task ${ecosystem.taskId} completed with exit reason: ${exitReason}. Turns: ${totalTurns}`,
-				"--type",
-				"result",
-			],
-			{ stdout: "ignore", stderr: "ignore" },
-		);
 	} catch {
 		// Silently fail - exit handling is best-effort
 	}
@@ -302,7 +284,9 @@ export async function runLoop(
 	// Base system prompt is kept immutable; pipeline returns a composed version each turn
 	const pipeline = new SaplingPipelineV1({
 		windowSize: options.contextWindowSize ?? 200_000,
-		verbose: false,
+		verbose: options.verbose ?? false,
+		tuning: options.pipelineTuning,
+		eventEmitter: options.eventEmitter,
 	});
 	// Track the pipeline-managed system prompt (updated each turn by the v1 pipeline)
 	let currentSystemPrompt = options.systemPrompt;
@@ -322,7 +306,7 @@ export async function runLoop(
 
 	while (totalTurns < maxTurns) {
 		// ── Abort check — before starting a new turn ─────────────────────────
-		// Triggered by RPC abort request or external signal (SIGTERM from ov stop).
+		// Triggered by RPC abort request or external signal (SIGTERM from orchestrator).
 		if (options.rpcServer?.isAbortRequested() || options.abortSignal?.aborted) {
 			const source = options.abortSignal?.aborted ? "signal" : "RPC request";
 			logger.info(`Agent loop aborted by ${source}`);
@@ -335,7 +319,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on abort
-			await handleEcosystemExit(options.ecosystemConfig, "aborted", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "aborted", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -370,8 +354,12 @@ export async function runLoop(
 		try {
 			response = await callWithRetry(client, request);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const rawMessage = err instanceof Error ? err.message : String(err);
 			const code = err instanceof ClientError ? err.code : "UNKNOWN";
+			const message =
+				code === "SDK_AUTH_FAILED"
+					? `${rawMessage} [hint: model "${options.model}" uses the ${resolveProvider(options.model)} provider — run 'sp auth set ${resolveProvider(options.model)} --key <key>' or 'sp doctor' to diagnose]`
+					: rawMessage;
 			logger.error(`Agent loop aborted: ${message}`);
 			options.eventEmitter?.emit({ type: "error", message, classification: code });
 			options.eventEmitter?.emit({
@@ -383,7 +371,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on error
-			await handleEcosystemExit(options.ecosystemConfig, "error", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "error", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -422,8 +410,10 @@ export async function runLoop(
 				inputTokens: totalInputTokens,
 				outputTokens: totalOutputTokens,
 			});
-			// Use last pipeline state for utilization
-			const contextUtilization = pipeline.getState()?.utilization ?? 0;
+			// Use last pipeline state for utilization + active operation info
+			const finalState = pipeline.getState();
+			const contextUtilization = finalState?.utilization ?? 0;
+			const { activeOperationId, activeOperationScore } = deriveActiveOpInfo(finalState);
 			options.eventEmitter?.emit({
 				type: "turn_end",
 				turn: totalTurns,
@@ -433,6 +423,9 @@ export async function runLoop(
 				cacheWriteTokens: response.usage.cacheCreationTokens ?? 0,
 				model: response.model,
 				contextUtilization,
+				activeOperationId,
+				activeOperationScore,
+				score: activeOperationScore,
 			});
 			options.eventEmitter?.emit({
 				type: "result",
@@ -443,7 +436,7 @@ export async function runLoop(
 			});
 			await fireSessionEnd(options.eventConfig?.onSessionEnd);
 			// Ecosystem exit: write final metrics on task completion
-			await handleEcosystemExit(options.ecosystemConfig, "task_complete", totalTurns, {
+			await writeFinalMetrics(options.ecosystemConfig, "task_complete", totalTurns, {
 				totalInputTokens,
 				totalOutputTokens,
 				totalCacheReadTokens,
@@ -465,7 +458,7 @@ export async function runLoop(
 		});
 
 		// ── Step 6: Execute tools in parallel ─────────────────────────────────
-		// Fire onToolStart heartbeat — fire-and-forget (updates overstory lastActivity)
+		// Fire onToolStart heartbeat — fire-and-forget (orchestrator lastActivity hook)
 		if (options.eventConfig?.onToolStart) {
 			Bun.spawn(options.eventConfig.onToolStart, { stdout: "ignore", stderr: "ignore" });
 		}
@@ -559,7 +552,7 @@ export async function runLoop(
 			}),
 		);
 
-		// Fire onToolEnd heartbeat — fire-and-forget (updates overstory lastActivity)
+		// Fire onToolEnd heartbeat — fire-and-forget (orchestrator lastActivity hook)
 		if (options.eventConfig?.onToolEnd) {
 			Bun.spawn(options.eventConfig.onToolEnd, { stdout: "ignore", stderr: "ignore" });
 		}
@@ -600,6 +593,7 @@ export async function runLoop(
 		messages.splice(0, messages.length, ...(pipelineResult.messages as LoopMessage[]));
 		currentSystemPrompt = pipelineResult.systemPrompt;
 		const contextUtilization = pipelineResult.state.utilization;
+		const { activeOperationId, activeOperationScore } = deriveActiveOpInfo(pipelineResult.state);
 
 		// Update RPC server with pipeline state for getState responses
 		const rpcState = pipeline.getRpcState() ?? undefined;
@@ -611,7 +605,8 @@ export async function runLoop(
 
 		options.setState?.({ turn: totalTurns, phase: "idle" });
 
-		// Emit turn_end with cumulative token counts and context utilization ratio
+		// Emit turn_end with cumulative token counts, context utilization ratio,
+		// and the active operation's id + score (alias `score`) at end-of-turn.
 		options.eventEmitter?.emit({
 			type: "turn_end",
 			turn: totalTurns,
@@ -621,13 +616,13 @@ export async function runLoop(
 			cacheWriteTokens: response.usage.cacheCreationTokens ?? 0,
 			model: response.model,
 			contextUtilization,
+			activeOperationId,
+			activeOperationScore,
+			score: activeOperationScore,
 		});
 
-		// ── Step 9: Ecosystem integration (overstory orchestration) ─────────────
+		// ── Step 9: Per-turn metrics for orchestrator consumers ────────────────
 		if (options.ecosystemConfig) {
-			// Check for pending mail from orchestrator
-			await checkEcosystemMail(options.ecosystemConfig);
-			// Write per-turn metrics
 			await writeTurnMetrics(
 				options.ecosystemConfig,
 				totalTurns,
@@ -664,7 +659,7 @@ export async function runLoop(
 	});
 	await fireSessionEnd(options.eventConfig?.onSessionEnd);
 	// Ecosystem exit: write final metrics on max turns
-	await handleEcosystemExit(options.ecosystemConfig, "max_turns", totalTurns, {
+	await writeFinalMetrics(options.ecosystemConfig, "max_turns", totalTurns, {
 		totalInputTokens,
 		totalOutputTokens,
 		totalCacheReadTokens,

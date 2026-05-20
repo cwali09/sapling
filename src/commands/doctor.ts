@@ -4,10 +4,10 @@
  */
 
 import type { Command } from "commander";
-import { loadConfig } from "../config.ts";
+import { loadConfig, resolveProvider } from "../config.ts";
 import { printJson } from "../json.ts";
 import { colors } from "../logging/color.ts";
-import { readAuthStore } from "./auth.ts";
+import type { SaplingConfig } from "../types.ts";
 import { compareSemver, getCurrentVersion, getLatestVersion } from "./version.ts";
 
 interface DoctorCheck {
@@ -27,23 +27,29 @@ async function checkConfig(): Promise<DoctorCheck> {
 }
 
 async function checkAuth(): Promise<DoctorCheck> {
-	const envKey = process.env.ANTHROPIC_API_KEY;
-	if (envKey) {
+	let config: SaplingConfig;
+	try {
+		config = await loadConfig();
+	} catch {
+		return {
+			name: "auth",
+			status: "warn",
+			message: "Auth check skipped — fix configuration first",
+		};
+	}
+	const provider = resolveProvider(config.model);
+	if (config.apiKey) {
 		return {
 			name: "auth",
 			status: "pass",
-			message: "API key configured via ANTHROPIC_API_KEY env var",
+			message: `API key configured for ${provider} (model: ${config.model})`,
 		};
 	}
-	const store = await readAuthStore();
-	if (store.providers.anthropic?.apiKey) {
-		return { name: "auth", status: "pass", message: "API key configured via ~/.sapling/auth.json" };
-	}
+	const envHint = provider === "anthropic" ? " or set ANTHROPIC_API_KEY" : "";
 	return {
 		name: "auth",
-		status: "warn",
-		message:
-			"No API key configured. Run 'sp auth set anthropic --key <key>' or set ANTHROPIC_API_KEY",
+		status: "fail",
+		message: `No API key for ${provider} provider (required by model "${config.model}"). Run 'sp auth set ${provider} --key <key>'${envHint}.`,
 	};
 }
 

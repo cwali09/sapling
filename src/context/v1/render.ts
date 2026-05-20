@@ -19,9 +19,6 @@ import type {
 	PipelineState,
 } from "./types.ts";
 
-/** Local extension type until pendingCommitments is merged into the canonical Operation type. */
-type OpWithPending = Operation & { pendingCommitments?: string[] };
-
 // ---------------------------------------------------------------------------
 // Archive entry template (local implementation; replaced by templates.ts import post-merge)
 // ---------------------------------------------------------------------------
@@ -42,7 +39,7 @@ function localArchiveEntry(op: Operation): string {
 		investigate: "Investigated",
 		mixed: "Worked on",
 	};
-	const pendingList = (op as OpWithPending).pendingCommitments ?? [];
+	const pendingList = op.pendingCommitments ?? [];
 	const pendingNote = pendingList.length > 0 ? ` (${pendingList.length} pending)` : "";
 	return `- [Op #${op.id}: ${op.type}] ${verb[op.type]}${files ? ` ${files}` : ""}. Outcome: ${op.outcome}.${pendingNote}`;
 }
@@ -263,11 +260,11 @@ export function composeSystemPrompt(
 		}
 
 		// Pending commitments from the active operation
-		const activePending = (activeOp as OpWithPending | null)?.pendingCommitments ?? [];
+		const activePending = activeOp?.pendingCommitments ?? [];
 		if (activeOp !== null && activePending.length > 0) {
 			prompt += "\n**Pending commitments:**\n";
 			for (const c of activePending.slice(0, 5)) {
-				prompt += `- ${c}\n`;
+				prompt += `- ${c.text}\n`;
 			}
 		}
 	}

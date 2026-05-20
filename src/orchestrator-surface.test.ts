@@ -1,16 +1,14 @@
 /**
- * E2E tests: verify sapling runtime works via overstory.
+ * E2E tests for sapling's general-purpose orchestrator integration surface.
  *
- * These tests verify the integration surface that overstory relies on when
- * spawning sapling as a headless agent subprocess:
- *   1. NDJSON event stream (--json mode) emits correct event sequence
+ * Any orchestrator that spawns sapling as a headless agent subprocess relies on:
+ *   1. NDJSON event stream (--json mode) emits the correct event sequence
  *   2. Guards + eventConfig lifecycle hooks fire at the right moments
  *   3. RPC socket server responds to getState queries
  *   4. Custom system prompt loaded from file
  *   5. RPC abort terminates the loop gracefully
  *
  * Uses mock LLM client + real tool registry. No API key required.
- * sapling-9aec
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -30,7 +28,7 @@ import {
 	mockToolUseResponse,
 } from "./test-helpers.ts";
 import { createDefaultRegistry } from "./tools/index.ts";
-import type { EventConfig, GuardConfig, LoopOptions } from "./types.ts";
+import type { EventConfig, GuardConfig, LlmResponse, LoopOptions } from "./types.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -68,7 +66,7 @@ function defaultLoopOptions(cwd: string, overrides: Partial<LoopOptions> = {}): 
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("overstory runtime E2E", () => {
+describe("orchestrator surface E2E", () => {
 	let testDir: string;
 
 	beforeEach(async () => {
@@ -80,8 +78,8 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 1. NDJSON event stream ─────────────────────────────────────────────────
-	// Overstory's SaplingRuntime.parseEvents() consumes these events.
-	// Verify the complete event sequence for a simple tool-using run.
+	// An orchestrator parses these events line-by-line from sapling's stdout
+	// to track turn boundaries, tool dispatches, and final exit reason.
 
 	it("emits correct NDJSON event sequence for a tool-using run", async () => {
 		const filePath = join(testDir, "hello.txt");
@@ -118,7 +116,7 @@ describe("overstory runtime E2E", () => {
 		// result must be last
 		expect(types[types.length - 1]).toBe("result");
 
-		// Verify ready event shape (overstory uses model, maxTurns, tools)
+		// Verify ready event shape (orchestrators read model, maxTurns, tools)
 		const ready = events.find((e) => e.type === "ready");
 		expect(ready).toBeDefined();
 		expect(ready?.model).toBe("mock-model");
@@ -167,8 +165,65 @@ describe("overstory runtime E2E", () => {
 		expect(types).not.toContain("tool_end");
 	});
 
+	// ── 2b. turn_end payloads carry active-operation telemetry ─────────────────
+	// Warren V2 (per plan pl-c3fc) consumes activeOperationId / activeOperationScore
+	// (and the documented `score` alias) on every turn_end to render per-turn
+	// pipeline relevance. Acceptance: ≥3 turns, every turn_end carries the fields.
+
+	it("turn_end payloads include activeOperationId, activeOperationScore, and `score` alias", async () => {
+		const fileA = join(testDir, "a.txt");
+		const fileB = join(testDir, "b.txt");
+		await Bun.write(fileA, "alpha");
+		await Bun.write(fileB, "beta");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Three turns: read fileA → read fileB → final text response.
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: fileA }, "tc-1"),
+			mockToolUseResponse("read", { file_path: fileB }, "tc-2"),
+			mockTextResponse("All read."),
+		]);
+
+		const tools = createDefaultRegistry();
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 5 }),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const turnEnds = events.filter((e) => e.type === "turn_end");
+		expect(turnEnds.length).toBeGreaterThanOrEqual(3);
+
+		for (const evt of turnEnds) {
+			// Fields must always be present (number | null), not undefined / missing.
+			expect("activeOperationId" in evt).toBe(true);
+			expect("activeOperationScore" in evt).toBe(true);
+			expect("score" in evt).toBe(true);
+
+			const id = evt.activeOperationId;
+			const score = evt.activeOperationScore;
+			expect(id === null || typeof id === "number").toBe(true);
+			expect(score === null || typeof score === "number").toBe(true);
+
+			// `score` is documented as an alias of activeOperationScore.
+			expect(evt.score).toBe(score as number | null);
+		}
+
+		// At least one turn ran inside an operation (the read tool calls form one).
+		const withActiveOp = turnEnds.filter((e) => e.activeOperationId !== null);
+		expect(withActiveOp.length).toBeGreaterThan(0);
+		for (const evt of withActiveOp) {
+			expect(typeof evt.activeOperationScore).toBe("number");
+			expect(evt.activeOperationScore).toBeGreaterThanOrEqual(0);
+			expect(evt.activeOperationScore).toBeLessThanOrEqual(1);
+		}
+	});
+
 	// ── 3. Guards + eventConfig: onSessionEnd fires ────────────────────────────
-	// Overstory configures eventConfig.onSessionEnd for session bookkeeping.
+	// Orchestrators wire eventConfig.onSessionEnd to a script for session bookkeeping.
 
 	it("fires eventConfig.onSessionEnd on task_complete", async () => {
 		const markerFile = join(testDir, "session-end-marker");
@@ -238,7 +293,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 5. Custom system prompt via file ───────────────────────────────────────
-	// Overstory passes agent persona files (builder, reviewer, scout).
+	// Orchestrators pass agent persona files (e.g. builder, reviewer, scout).
 
 	it("uses custom system prompt in LLM requests", async () => {
 		const customPrompt = "You are a specialized code reviewer. Never edit files.";
@@ -255,8 +310,8 @@ describe("overstory runtime E2E", () => {
 		expect(firstCall.systemPrompt).toContain("specialized code reviewer");
 	});
 
-	// ── 6. Guards enforcement with overstory-style guards.json ─────────────────
-	// Overstory passes --guards-file with pathBoundary and readOnly for reviewer agents.
+	// ── 6. Guards enforcement with reviewer-style guards.json ──────────────────
+	// Orchestrators pass --guards-file with pathBoundary and readOnly for reviewer agents.
 
 	it("enforces readOnly + pathBoundary guards (reviewer agent pattern)", async () => {
 		const guardsPath = await writeGuardsJson(testDir, {
@@ -312,7 +367,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 7. RPC socket: getState queries ────────────────────────────────────────
-	// Overstory uses `ov inspect` which queries the RPC socket for agent state.
+	// Orchestrators query the RPC socket for live agent state ("what phase is it in?").
 
 	it("responds to getState queries on RPC socket", async () => {
 		const socketPath = join(testDir, "rpc.sock");
@@ -368,7 +423,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 8. RPC abort terminates loop ───────────────────────────────────────────
-	// Overstory sends abort requests to stop agents.
+	// Orchestrators send abort requests to stop agents cleanly.
 
 	it("aborts loop when RPC abort is received before first turn", async () => {
 		const { emitter, events } = createCapturingEmitter();
@@ -405,7 +460,7 @@ describe("overstory runtime E2E", () => {
 	});
 
 	// ── 9. setState callback updates RPC state ─────────────────────────────────
-	// Overstory queries agent phase via getState — verify setState is called.
+	// Orchestrators read agent phase via getState — verify setState is called.
 
 	it("calls setState callback at turn boundaries", async () => {
 		const states: { turn: number; phase: string }[] = [];
@@ -437,9 +492,9 @@ describe("overstory runtime E2E", () => {
 		expect(states[0]?.phase).toBe("calling_llm");
 	});
 
-	// ── 10. abortSignal terminates loop gracefully (ov stop → SIGTERM) ────────
-	// When ov stop sends SIGTERM, the CLI wires it to abortSignal. Verify
-	// the loop exits with "aborted" and fires onSessionEnd.
+	// ── 10. abortSignal terminates loop gracefully (SIGTERM from orchestrator) ─
+	// When the orchestrator (or any caller) sends SIGTERM, the CLI wires it to
+	// abortSignal. Verify the loop exits with "aborted" and fires onSessionEnd.
 
 	it("abortSignal terminates loop gracefully with onSessionEnd", async () => {
 		const markerFile = join(testDir, "signal-end-marker");
@@ -517,8 +572,257 @@ describe("overstory runtime E2E", () => {
 		expect(result.totalTurns).toBe(0);
 	});
 
+	// ── 11a. Pipeline decision events: `compact` ───────────────────────────────
+	// Warren V2 (per plan pl-c3fc) consumes `compact` events to render compaction
+	// activity in its UI. Acceptance: an event with `reason: "score_below_threshold"`
+	// and `archivedAs: "compacted"` fires when older ops drop below the threshold.
+
+	it("emits `compact` events when older ops drop below the configured score threshold", async () => {
+		const fileA = join(testDir, "alpha.ts");
+		const fileB = join(testDir, "beta.ts");
+		const fileC = join(testDir, "gamma.ts");
+		await Bun.write(fileA, "alpha");
+		await Bun.write(fileB, "beta");
+		await Bun.write(fileC, "gamma");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Three distinct file scopes encourage operation boundaries between turns.
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: fileA }, "tc-1"),
+			mockToolUseResponse("read", { file_path: fileB }, "tc-2"),
+			mockToolUseResponse("read", { file_path: fileC }, "tc-3"),
+			mockTextResponse("All read."),
+		]);
+
+		const tools = createDefaultRegistry();
+		// boundaryThreshold=0 forces every turn into a new operation (so older ops
+		// complete and become compaction-eligible). compactionScoreThreshold=0.99
+		// then forces every completed op below the active one to compact, since
+		// scores are clamped to [0,1] and the active op is exempt.
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, {
+				eventEmitter: emitter,
+				maxTurns: 6,
+				pipelineTuning: { boundaryThreshold: 0, compactionScoreThreshold: 0.99 },
+			}),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const compactEvents = events.filter((e) => e.type === "compact");
+		expect(compactEvents.length).toBeGreaterThan(0);
+
+		for (const evt of compactEvents) {
+			expect(["score_below_threshold", "budget_pressure"]).toContain(evt.reason as string);
+			expect(["compacted", "archived"]).toContain(evt.archivedAs as string);
+			expect(typeof evt.operationId).toBe("number");
+			expect(typeof evt.turn).toBe("number");
+			expect(typeof evt.score).toBe("number");
+			expect(evt.score as number).toBeGreaterThanOrEqual(0);
+			expect(evt.score as number).toBeLessThanOrEqual(1);
+		}
+
+		// At least one event should be score-driven (the threshold trigger we set up).
+		const scoreDriven = compactEvents.find((e) => e.reason === "score_below_threshold");
+		expect(scoreDriven).toBeDefined();
+		expect(scoreDriven?.archivedAs).toBe("compacted");
+	});
+
+	// ── 11b. Pipeline decision events: `commitment_added` ──────────────────────
+	// The commitment-track stage extracts future-action promises from assistant
+	// text and emits `commitment_added` with a deterministic `c-<turn>-<n>` id.
+
+	it("emits `commitment_added` for future-action assistant text", async () => {
+		const targetFile = join(testDir, "target.ts");
+		await Bun.write(targetFile, "old content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		// Numbered-list commitment in assistant text — the most reliable extractor input.
+		// COMMITMENT_FILE_PATTERN matches `target.ts` (extension allow-list).
+		const responseWithCommitment: LlmResponse = {
+			content: [
+				{
+					type: "text",
+					text: "Plan:\n1. Edit target.ts to update the data",
+				},
+				{ type: "tool_use", id: "tc-1", name: "read", input: { file_path: targetFile } },
+			],
+			usage: { inputTokens: 100, outputTokens: 50 },
+			model: "mock-model",
+			stopReason: "tool_use",
+		};
+
+		const client = createMockClient([responseWithCommitment, mockTextResponse("Read.")]);
+
+		const tools = createDefaultRegistry();
+		const result = await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 5 }),
+		);
+
+		expect(result.exitReason).toBe("task_complete");
+
+		const added = events.filter((e) => e.type === "commitment_added");
+		expect(added.length).toBeGreaterThan(0);
+
+		const evt = added[0] as Record<string, unknown>;
+		expect(typeof evt.commitmentId).toBe("string");
+		expect(evt.commitmentId).toMatch(/^c-\d+-\d+$/);
+		expect(typeof evt.text).toBe("string");
+		expect(evt.text).toContain("target.ts");
+		expect(typeof evt.operationId).toBe("number");
+		expect(typeof evt.producedTurn).toBe("number");
+		expect(evt.producedTurn).toBe(1);
+	});
+
+	// ── 11c. Pipeline decision events: `pipeline_stage` (verbose-gated) ────────
+	// Under --verbose, every pipeline stage emits a structured summary event.
+	// Without verbose, no pipeline_stage events fire (matches existing stderr behavior).
+
+	it("emits `pipeline_stage` events for every stage when verbose=true", async () => {
+		const filePath = join(testDir, "data.ts");
+		await Bun.write(filePath, "content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: filePath }, "tc-1"),
+			mockTextResponse("Done."),
+		]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, verbose: true, maxTurns: 4 }),
+		);
+
+		const stageEvents = events.filter((e) => e.type === "pipeline_stage");
+		const stages = new Set(stageEvents.map((e) => e.stage));
+		// Default registry runs ingest → commitment-track → evaluate → compact → budget → render.
+		expect(stages.has("ingest")).toBe(true);
+		expect(stages.has("commitment-track")).toBe(true);
+		expect(stages.has("evaluate")).toBe(true);
+		expect(stages.has("compact")).toBe(true);
+		expect(stages.has("budget")).toBe(true);
+		expect(stages.has("render")).toBe(true);
+
+		for (const evt of stageEvents) {
+			expect(typeof evt.turn).toBe("number");
+			expect(typeof evt.stage).toBe("string");
+		}
+	});
+
+	it("emits no `pipeline_stage` events when verbose is off", async () => {
+		const filePath = join(testDir, "data.ts");
+		await Bun.write(filePath, "content");
+
+		const { emitter, events } = createCapturingEmitter();
+
+		const client = createMockClient([
+			mockToolUseResponse("read", { file_path: filePath }, "tc-1"),
+			mockTextResponse("Done."),
+		]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, maxTurns: 4 }),
+		);
+
+		const stageEvents = events.filter((e) => e.type === "pipeline_stage");
+		expect(stageEvents.length).toBe(0);
+	});
+
+	// ── 11d. RPC getState response includes pipeline.commitments ───────────────
+	// External tools polling the unix socket get the commitment registry alongside
+	// the rest of the pipeline state. Capped at MAX_RPC_COMMITMENTS (50).
+
+	it("includes pipeline.commitments in getState responses after the loop runs", async () => {
+		const targetFile = join(testDir, "target.ts");
+		await Bun.write(targetFile, "old content");
+
+		const { emitter } = createCapturingEmitter();
+
+		// Run the loop with an RpcServer so its pipeline state is populated.
+		const emptyStream = new ReadableStream<Uint8Array>({
+			start(c) {
+				c.close();
+			},
+		});
+		const rpcServer = new RpcServer(emptyStream, emitter);
+
+		const responseWithCommitment: LlmResponse = {
+			content: [
+				{ type: "text", text: "Plan:\n1. Edit target.ts to update the data" },
+				{ type: "tool_use", id: "tc-1", name: "read", input: { file_path: targetFile } },
+			],
+			usage: { inputTokens: 100, outputTokens: 50 },
+			model: "mock-model",
+			stopReason: "tool_use",
+		};
+		const client = createMockClient([responseWithCommitment, mockTextResponse("Read.")]);
+
+		const tools = createDefaultRegistry();
+		await runLoop(
+			client,
+			tools,
+			defaultLoopOptions(testDir, { eventEmitter: emitter, rpcServer, maxTurns: 5 }),
+		);
+
+		// Now query the socket and assert the response shape.
+		const socketPath = join(testDir, "rpc-commitments.sock");
+		const socketServer = new RpcSocketServer(rpcServer);
+		try {
+			await socketServer.start(socketPath);
+
+			const response = await new Promise<string>((resolve, reject) => {
+				let buf = "";
+				Bun.connect({
+					unix: socketPath,
+					socket: {
+						open(socket) {
+							socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getState" })}\n`);
+						},
+						data(_socket, chunk) {
+							buf += new TextDecoder().decode(chunk);
+							if (buf.includes("\n")) resolve(buf.trim());
+						},
+						error(_socket, err) {
+							reject(err);
+						},
+					},
+				});
+				setTimeout(() => resolve(buf.trim()), 2000);
+			});
+
+			const parsed = JSON.parse(response);
+			expect(parsed.result).toBeDefined();
+			expect(parsed.result.pipeline).toBeDefined();
+			// commitments is always present on pipeline state once the v1 pipeline has run.
+			expect(Array.isArray(parsed.result.pipeline.commitments)).toBe(true);
+			expect(parsed.result.pipeline.commitments.length).toBeGreaterThan(0);
+			expect(parsed.result.pipeline.commitments.length).toBeLessThanOrEqual(50);
+
+			const sample = parsed.result.pipeline.commitments[0];
+			expect(typeof sample.id).toBe("string");
+			expect(sample.id).toMatch(/^c-\d+-\d+$/);
+			expect(typeof sample.turn).toBe("number");
+			expect(typeof sample.text).toBe("string");
+			expect(["pending", "resolved"]).toContain(sample.status);
+		} finally {
+			await socketServer.stop();
+		}
+	});
+
 	// ── 12. Full subprocess E2E (gated) ────────────────────────────────────────
-	// Spawns sapling as overstory would, with --json mode, verifies NDJSON stdout.
+	// Spawns sapling as an orchestrator would, with --json mode, verifies NDJSON stdout.
 
 	const SKIP_INTEG = !process.env.SAPLING_INTEGRATION_TESTS;
 
@@ -526,7 +830,7 @@ describe("overstory runtime E2E", () => {
 		"subprocess with --json emits parseable NDJSON events",
 		async () => {
 			const filePath = join(testDir, "marker.txt");
-			await Bun.write(filePath, "OV_E2E_MARKER_42");
+			await Bun.write(filePath, "ORCHESTRATOR_E2E_MARKER_42");
 
 			const proc = Bun.spawn(
 				[

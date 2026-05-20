@@ -12,8 +12,10 @@
 import type { Message, ToolPipelineMetadata } from "../../types.ts";
 import type {
 	BoundarySignals,
+	Commitment,
 	Operation,
 	OperationType,
+	PipelineTuning,
 	ToolPhase,
 	Turn,
 	TurnMetadata,
@@ -136,15 +138,30 @@ const FILE_IN_COMMITMENT_PATTERN =
  * Extract future-action commitments from assistant text.
  * Detects numbered/bulleted action lists and future-tense promises.
  * Returns deduplicated list, capped at 20 items.
+ *
+ * IDs are deterministic: `c-<turnNumber>-<n>` (1-based n). The same input text +
+ * turn number always yields the same IDs, so re-running the extractor across
+ * pipeline cycles produces stable identities.
+ *
+ * @param turnNumber 1-based turn number that produced this assistant text.
  */
-export function extractCommitments(text: string): string[] {
-	const commitments = new Set<string>();
+export function extractCommitments(text: string, turnNumber: number): Commitment[] {
+	const seen = new Set<string>();
+	const ordered: string[] = [];
+
+	const add = (raw: string | undefined): void => {
+		if (raw === undefined) return;
+		const trimmed = raw.slice(0, 120);
+		if (seen.has(trimmed)) return;
+		seen.add(trimmed);
+		ordered.push(trimmed);
+	};
 
 	// Numbered lists: "1. edit foo.ts"
 	for (const match of text.matchAll(COMMITMENT_NUMBERED_PATTERN)) {
 		const item = match[1]?.trim();
 		if (item && (COMMITMENT_ACTION_PATTERN.test(item) || COMMITMENT_FILE_PATTERN.test(item))) {
-			commitments.add(item.slice(0, 120));
+			add(item);
 		}
 	}
 
@@ -152,7 +169,7 @@ export function extractCommitments(text: string): string[] {
 	for (const match of text.matchAll(COMMITMENT_BULLET_PATTERN)) {
 		const item = match[1]?.trim();
 		if (item && (COMMITMENT_ACTION_PATTERN.test(item) || COMMITMENT_FILE_PATTERN.test(item))) {
-			commitments.add(item.slice(0, 120));
+			add(item);
 		}
 	}
 
@@ -160,19 +177,21 @@ export function extractCommitments(text: string): string[] {
 	for (const match of text.matchAll(COMMITMENT_FUTURE_PATTERN)) {
 		const action = match[1]?.trim();
 		if (action && action.length >= 5) {
-			commitments.add(action.slice(0, 120));
+			add(action);
 		}
 	}
 
-	return [...commitments].slice(0, 20);
+	return ordered
+		.slice(0, 20)
+		.map((textValue, idx) => ({ id: `c-${turnNumber}-${idx + 1}`, text: textValue }));
 }
 
 /**
- * Extract file paths mentioned in a commitment string.
+ * Extract file paths mentioned in a commitment text.
  */
-function extractFilesFromCommitment(commitment: string): string[] {
+export function extractFilesFromCommitment(commitmentText: string): string[] {
 	const files: string[] = [];
-	for (const match of commitment.matchAll(FILE_IN_COMMITMENT_PATTERN)) {
+	for (const match of commitmentText.matchAll(FILE_IN_COMMITMENT_PATTERN)) {
 		if (match[1] !== undefined) files.push(match[1]);
 	}
 	return files;
@@ -185,31 +204,35 @@ function extractFilesFromCommitment(commitment: string): string[] {
  *   - It has no file paths and comes from the last turn (general unresolved promise).
  * Returns empty list if outcome is "success" (all work completed).
  */
-export function computePendingCommitments(op: Operation): string[] {
+export function computePendingCommitments(op: Operation): Commitment[] {
 	if (op.outcome === "success") return [];
 
 	const artifactSet = new Set(op.artifacts);
-	const pending: string[] = [];
-	const lastTurnCommitments = new Set<string>(
-		op.turns[op.turns.length - 1]?.meta.commitments ?? [],
+	const pending: Commitment[] = [];
+	const seenIds = new Set<string>();
+	const lastTurnIds = new Set<string>(
+		(op.turns[op.turns.length - 1]?.meta.commitments ?? []).map((c) => c.id),
 	);
 
 	for (const turn of op.turns) {
 		for (const commitment of turn.meta.commitments ?? []) {
-			const mentionedFiles = extractFilesFromCommitment(commitment);
+			if (seenIds.has(commitment.id)) continue;
+			const mentionedFiles = extractFilesFromCommitment(commitment.text);
 			if (mentionedFiles.length > 0) {
 				// Pending if any mentioned file was not produced as an artifact
 				if (mentionedFiles.some((f) => !artifactSet.has(f))) {
 					pending.push(commitment);
+					seenIds.add(commitment.id);
 				}
-			} else if (lastTurnCommitments.has(commitment)) {
+			} else if (lastTurnIds.has(commitment.id)) {
 				// Non-file commitment from the last turn — include as-is
 				pending.push(commitment);
+				seenIds.add(commitment.id);
 			}
 		}
 	}
 
-	return [...new Set(pending)].slice(0, 10);
+	return pending.slice(0, 10);
 }
 
 /**
@@ -231,10 +254,14 @@ function estimateTokens(msg: Message): number {
 
 /**
  * Build TurnMetadata from an assistant message and its tool results.
+ *
+ * `turnNumber` is the 1-based turn number used to mint stable commitment IDs of the
+ * form `c-<turnNumber>-<n>`. extractTurns() passes (0-based index + 1).
  */
 function extractTurnMetadata(
 	assistant: Message & { role: "assistant" },
 	toolResults: (Message & { role: "user" }) | null,
+	turnNumber: number,
 ): TurnMetadata {
 	const tools = extractToolNames(assistant);
 	const files = extractFilePaths(assistant, toolResults);
@@ -249,7 +276,7 @@ function extractTurnMetadata(
 		hasDecision: detectDecision(assistantText),
 		tokens: assistantTokens + resultTokens,
 		timestamp: Date.now(),
-		commitments: extractCommitments(assistantText),
+		commitments: extractCommitments(assistantText, turnNumber),
 	};
 }
 
@@ -271,12 +298,13 @@ export function extractTurns(messages: Message[]): Turn[] {
 		const hasResults = nextMsg !== undefined && nextMsg.role === "user";
 
 		const toolResults = hasResults ? (nextMsg as Message & { role: "user" }) : null;
+		const idx = turnIndex++;
 
 		turns.push({
-			index: turnIndex++,
+			index: idx,
 			assistant: assistantMsg,
 			toolResults,
-			meta: extractTurnMetadata(assistantMsg, toolResults),
+			meta: extractTurnMetadata(assistantMsg, toolResults, idx + 1),
 		});
 
 		if (hasResults) i++; // skip the paired user message
@@ -400,14 +428,16 @@ export function computeBoundarySignals(activeOp: Operation, turn: Turn): Boundar
  * steerRedirect is an unconditional override: a steer with redirect language
  * always triggers a boundary regardless of other signals.
  */
-export function detectBoundary(signals: BoundarySignals): boolean {
+export function detectBoundary(signals: BoundarySignals, tuning?: PipelineTuning): boolean {
 	if (signals.steerRedirect) return true;
+	const weights = { ...BOUNDARY_WEIGHTS, ...tuning?.boundaryWeights };
+	const threshold = tuning?.boundaryThreshold ?? BOUNDARY_THRESHOLD;
 	const score =
-		(signals.toolTypeTransition ? BOUNDARY_WEIGHTS.toolTypeTransition : 0) +
-		(signals.fileScopeChange ? BOUNDARY_WEIGHTS.fileScopeChange : 0) +
-		(signals.intentSignal ? BOUNDARY_WEIGHTS.intentSignal : 0) +
-		(signals.temporalGap ? BOUNDARY_WEIGHTS.temporalGap : 0);
-	return score >= BOUNDARY_THRESHOLD;
+		(signals.toolTypeTransition ? weights.toolTypeTransition : 0) +
+		(signals.fileScopeChange ? weights.fileScopeChange : 0) +
+		(signals.intentSignal ? weights.intentSignal : 0) +
+		(signals.temporalGap ? weights.temporalGap : 0);
+	return score >= threshold;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +618,7 @@ export function ingestTurn(
 	activeOperationId: number | null,
 	turn: Turn,
 	nextOperationId: number,
+	tuning?: PipelineTuning,
 ): IngestResult {
 	// No active operation — start fresh
 	if (activeOperationId === null || operations.length === 0) {
@@ -614,7 +645,7 @@ export function ingestTurn(
 	// biome-ignore lint/style/noNonNullAssertion: activeIdx was just verified valid
 	const activeOp = operations[activeIdx]!;
 	const signals = computeBoundarySignals(activeOp, turn);
-	const isBoundary = detectBoundary(signals);
+	const isBoundary = detectBoundary(signals, tuning);
 
 	const updatedOps = [...operations];
 
@@ -657,6 +688,7 @@ export function ingest(
 	existingOperations: Operation[],
 	activeOperationId: number | null,
 	nextOperationId: number,
+	tuning?: PipelineTuning,
 ): IngestResult {
 	const allTurns = extractTurns(messages);
 
@@ -682,7 +714,13 @@ export function ingest(
 	};
 
 	for (const turn of newTurns) {
-		result = ingestTurn(result.operations, result.activeOperationId, turn, result.nextOperationId);
+		result = ingestTurn(
+			result.operations,
+			result.activeOperationId,
+			turn,
+			result.nextOperationId,
+			tuning,
+		);
 	}
 
 	return result;

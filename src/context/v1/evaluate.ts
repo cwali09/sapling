@@ -11,6 +11,7 @@ import {
 	type EvalSignalContext,
 	type Operation,
 	type OperationType,
+	type PipelineTuning,
 	RECENCY_HALF_LIFE_OPS,
 } from "./types.ts";
 
@@ -187,16 +188,56 @@ export function evaluateOperation(
 // ---------------------------------------------------------------------------
 
 /**
+ * Build evaluation signals with optional tuning overrides.
+ * Falls back to EVAL_WEIGHTS defaults for any unset weight.
+ */
+function buildSignals(tuning: PipelineTuning): EvalSignal[] {
+	const w = tuning.evalWeights ?? {};
+	const halfLife = tuning.recencyHalfLifeOps ?? RECENCY_HALF_LIFE_OPS;
+	return [
+		{
+			name: "recency",
+			weight: w.recency ?? EVAL_WEIGHTS.recency,
+			scoreFn: ({ opsAgo }: EvalSignalContext) => Math.exp((-Math.log(2) * opsAgo) / halfLife),
+		},
+		{
+			name: "fileOverlap",
+			weight: w.fileOverlap ?? EVAL_WEIGHTS.fileOverlap,
+			scoreFn: ({ op, activeFiles }: EvalSignalContext) => fileOverlapScore(op.files, activeFiles),
+		},
+		{
+			name: "causalDependency",
+			weight: w.causalDependency ?? EVAL_WEIGHTS.causalDependency,
+			scoreFn: ({ op, activeOp }: EvalSignalContext) =>
+				activeOp !== null ? causalDependencyScore(op, activeOp) : 0,
+		},
+		{
+			name: "outcomeSignificance",
+			weight: w.outcomeSignificance ?? EVAL_WEIGHTS.outcomeSignificance,
+			scoreFn: ({ op }: EvalSignalContext) => outcomeSignificanceScore(op),
+		},
+		{
+			name: "operationType",
+			weight: w.operationType ?? EVAL_WEIGHTS.operationType,
+			scoreFn: ({ op }: EvalSignalContext) => operationTypeScore(op.type),
+		},
+	];
+}
+
+/**
  * Evaluate stage: update the `score` field on every operation in-place.
  *
  * The active operation (status === "active") always receives the recency score
  * of 0 opsAgo (i.e. 1.0 recency), full self-overlap, and maximum causal weight.
  */
-export function evaluate(operations: Operation[]): void {
+export function evaluate(operations: Operation[], tuning?: PipelineTuning): void {
 	const totalOps = operations.length;
 	const activeOp = operations.find((o) => o.status === "active") ?? null;
 
+	// Build signals with tuning overrides if provided
+	const signals = tuning?.evalWeights ? buildSignals(tuning) : DEFAULT_SIGNALS;
+
 	for (const op of operations) {
-		op.score = evaluateOperation(op, activeOp, totalOps);
+		op.score = evaluateOperation(op, activeOp, totalOps, signals);
 	}
 }

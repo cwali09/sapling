@@ -16,12 +16,21 @@
 import type { Message } from "../../types.ts";
 import { createDefaultStageRegistry, type StageRegistry } from "./registry.ts";
 import type {
+	CommitmentRecord,
 	Operation,
+	PipelineEventSink,
 	PipelineInput,
 	PipelineOutput,
 	PipelineState,
+	PipelineTuning,
 	StageContext,
 } from "./types.ts";
+
+/**
+ * Cap on commitments surfaced through getRpcState() so the RPC payload stays
+ * bounded even after long sessions. Mirrors MAX_RPC_COMMITMENTS in src/rpc/types.ts.
+ */
+const RPC_COMMITMENT_CAP = 50;
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -37,6 +46,14 @@ export interface PipelineOptions {
 	 * Pass a custom registry to add, remove, or replace pipeline stages.
 	 */
 	registry?: StageRegistry;
+	/** Optional pipeline tuning overrides (from config cascade). */
+	tuning?: PipelineTuning;
+	/**
+	 * Optional sink for pipeline decision events (compact, commitment_added,
+	 * pipeline_stage, ...). Threaded into every StageContext via process().
+	 * Structural type — pass the loop's EventEmitter directly.
+	 */
+	eventEmitter?: PipelineEventSink;
 }
 
 /**
@@ -49,15 +66,20 @@ export class SaplingPipelineV1 {
 	private operations: Operation[] = [];
 	private activeOperationId: number | null = null;
 	private nextOperationId = 1;
+	private commitmentRegistry: CommitmentRecord[] = [];
 	private readonly windowSize: number;
 	private readonly verbose: boolean;
 	private lastState: PipelineState | null = null;
 	private readonly registry: StageRegistry;
+	private readonly tuning?: PipelineTuning;
+	private readonly eventEmitter?: PipelineEventSink;
 
 	constructor(options: PipelineOptions) {
 		this.windowSize = options.windowSize;
 		this.verbose = options.verbose ?? false;
 		this.registry = options.registry ?? createDefaultStageRegistry();
+		this.tuning = options.tuning;
+		this.eventEmitter = options.eventEmitter;
 	}
 
 	/**
@@ -78,13 +100,19 @@ export class SaplingPipelineV1 {
 		}
 
 		// Build the shared stage context and run all pipeline stages.
+		// commitmentRegistry is mutated in place by the commitment-track stage,
+		// so passing the array directly keeps SaplingPipelineV1's view in sync.
 		const ctx: StageContext = {
 			input,
 			windowSize: this.windowSize,
 			verbose: this.verbose,
+			currentTurn: input.turnHint.turn,
+			eventEmitter: this.eventEmitter,
+			tuning: this.tuning,
 			operations: this.operations,
 			activeOperationId: this.activeOperationId,
 			nextOperationId: this.nextOperationId,
+			commitmentRegistry: this.commitmentRegistry,
 			budgetUtil: null,
 			output: null,
 		};
@@ -95,6 +123,7 @@ export class SaplingPipelineV1 {
 		this.operations = ctx.operations;
 		this.activeOperationId = ctx.activeOperationId;
 		this.nextOperationId = ctx.nextOperationId ?? this.nextOperationId;
+		this.commitmentRegistry = ctx.commitmentRegistry;
 
 		if (!ctx.output) {
 			throw new Error(
@@ -116,19 +145,34 @@ export class SaplingPipelineV1 {
 
 	/**
 	 * Return a compact pipeline state for RPC getState responses.
+	 *
+	 * Shape mirrors PipelineRpcState in src/rpc/types.ts (kept structural to
+	 * preserve the src/context → src/rpc independence noted in pipeline.ts:50).
 	 */
 	getRpcState(): {
 		activeOperationId: number | null;
 		operationCount: number;
 		contextUtilization: number;
 		archiveEntryCount: number;
+		commitments: Array<{
+			id: string;
+			turn: number;
+			text: string;
+			status: "pending" | "resolved";
+		}>;
 	} | null {
 		if (!this.lastState) return null;
+		// Most-recent first, then by id for a stable tiebreaker. Cap at 50.
+		const commitments = [...this.commitmentRegistry]
+			.sort((a, b) => b.turn - a.turn || a.id.localeCompare(b.id))
+			.slice(0, RPC_COMMITMENT_CAP)
+			.map((r) => ({ id: r.id, turn: r.turn, text: r.text, status: r.status }));
 		return {
 			activeOperationId: this.lastState.activeOperationId,
 			operationCount: this.lastState.operations.length,
 			contextUtilization: this.lastState.utilization,
 			archiveEntryCount: this.lastState.operationCounts.archived,
+			commitments,
 		};
 	}
 
@@ -138,6 +182,15 @@ export class SaplingPipelineV1 {
 	 */
 	getRegistry(): StageRegistry {
 		return this.registry;
+	}
+
+	/**
+	 * Return a snapshot of the commitment registry for inspection.
+	 * Returned array is a shallow copy; mutating it does not affect pipeline state.
+	 * Consumed by RPC `getState` (sapling-dda1) and tests.
+	 */
+	getCommitmentRegistry(): CommitmentRecord[] {
+		return this.commitmentRegistry.map((r) => ({ ...r }));
 	}
 }
 
