@@ -51,10 +51,9 @@ Prepare a release by updating docs and bumping the version.
 - Update architecture descriptions if features changed
 - Add new files to the Project Structure listing
 
-### 7. Present summary
+### 7. Commit and present summary
 
+- Commit all changes with a message like "release: vX.Y.Z"
 - Show a summary of all changes made
 - List the version bump (old -> new)
 - Summarize what was documented in the changelog
-
-Do NOT commit or push. Just make the edits and present the summary.
